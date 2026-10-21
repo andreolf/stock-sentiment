@@ -153,7 +153,9 @@ Evidence: vault note Research-2026-10-21-sentiment-trading-comparables.
 - **HARD RULE: no position through an earnings report.** Any open position (tracked or untracked) in a ticker with
   earnings after today's close (`earnings` table, date = today ET, time_of_day not pre-market; unknown time counts
   as after close) is market-closed at ≥ 15:40 ET (`earnings_flat_by_et`) so it is flat before 15:45 ET. New entries
-  in such a ticker get `exit_due` capped at 15:40 ET; after 15:40 ET they are logged hypothetical only.
+  in such a ticker get `exit_due` capped at 15:40 ET (no time exit may fall after the release), and from 15:00 ET
+  (`earnings_no_entry_after_et`) no new entry is opened in that ticker at all (logged hypothetical "earnings after
+  close today (no new entries after 15:00 ET)"). Other tickers are unaffected.
   Make sure `earnings.py fetch` has run today (the routine does it first) or the rule has no calendar to read.
 - One position per ticker; shorts only if shortable + easy to borrow. Kill switch: `touch data/KILL`.
 
@@ -286,7 +288,7 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
   2026-10-21 regression), Form 4 parsing, earnings session logic
 - `tests/test_trader.py` sizing (5%/20% caps, volatility sizing), bracket levels/ATR, paper-only URL guard,
   news gate (fresh/stale/contradicting/SEC; company focus: Cyclicals + SpaceX/chip-stocks rejected, genuine pass), v2 rules with a fake client, earnings pause/drift, evaluation slippage,
-  ExitEnforcement (exits-only timing, short buy-back, earnings flat-by-15:40 incl. untracked, exit_due cap, lock, collector order)
+  ExitEnforcement (exits-only timing, short buy-back, earnings flat-by-15:40 incl. untracked, exit_due cap, 15:00 ET entry block, lock, collector order)
 - `budget.py` ledger (`check N` / `record N note [--force]` / `status [--days K]`), cap 150/day UTC+8
 - `db.py` schema + helpers; DB `data/sentiment.db` (posts, post_batches, scores, counts, runs, signals,
   signal_returns, paper_trades). Env `STOCK_SENT_DB` / `STOCK_SENT_BUDGET` override paths (tests).
