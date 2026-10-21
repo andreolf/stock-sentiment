@@ -122,6 +122,15 @@ Evidence: vault note Research-2026-10-21-sentiment-trading-comparables.
 - **v2_news_momentum**: trade WITH the trigger direction only if `newsgate.hard_news()` finds a fresh (≤ 60 min),
   novel (word-Jaccard novelty ≥ 0.5 vs the ticker's headlines 72 h–60 min earlier) tier-1/2 media or Benzinga
   headline that does not contradict the direction, or an 8-K / insider-buy Form 4 (when EDGAR is reachable).
+  **Company focus (approved 2026-10-21)**: the headline must NAME the company — ticker as an upper-case word or
+  `$cashtag`, or an alias from `config.json` `newsgate.aliases` (case-insensitive; e.g. Tesla, Nvidia/NVIDIA,
+  Palantir, Meta/Facebook; media display names and Swiss aliases are added automatically). The teaser (Benzinga
+  summary) counts only if the headline is not a basket/index headline and is not about another company's
+  "Stock"/"Shares". `newsgate.generic_patterns` (sector recaps, "stocks moving", "stocks to watch", movers, market
+  wrap, "Here are top N") are always rejected; `newsgate.index_patterns` (Dow/S&P/Nasdaq/Wall Street, "chip stocks",
+  any plural "stocks") pass only when the headline itself names the company. The Benzinga `symbols` tag alone never
+  counts; SEC filings are exempt. Origin: NVDA short 2026-10-21 17:08 Zurich backed by "Cyclicals Top Sectors In
+  Wednesday Trading As Defensives Trail" (no Nvidia mention). `hard_news(..., rejected=[])` lists dropped headlines.
 - **v2_attention_fade**: attention-only triggers (no fresh news) → paper-only fade hypothetical, never an order.
 - **v1_follow_spike**: the retired rule (sentiment_shock follow + agreeing spike) is still logged as a hypothetical.
 - **earnings_drift**: reaction days 1–3, only if surprise (|≥2%|), the real opening gap (|≥1%|) and post-release
@@ -224,7 +233,14 @@ Research-2026-10-21-swiss-market-focus.
   overrides (`media.py apply`) win.
 - `composite.py`: z-scored X sentiment, X volume ratio, Reddit mention change, tier-weighted media sentiment, media
   headline-count change (after ≥ 3 days of collection), IEX volume ratio → signed composite (sentiment sets the
-  direction, attention amplifies). |z| > 2 → hypothetical `composite` signal (follow + fade) for evaluation.
+  direction, attention amplifies). |z| > 2 → `composite` follow + fade signal (paper_trader treats the follow row as
+  a trigger, still subject to the news gate).
+  **z hygiene (approved 2026-10-21)**: X sentiment / X volume are z-scored against prior distinct X runs (`runs`, one
+  per batch, current batch excluded), not composite rows (the 5-min collector repeated one X value ~10×, std → ~0,
+  NVDA z_x_sent −8.31 on raw +0.095). < 5 prior runs → X component weight 0 (note "x_sent warmup n/5"). Std floors:
+  0.05 sentiment, 0.25 log-ratios; other components need ≥ 20 rows AND ≥ 5 distinct values, else the fixed warm-up
+  scale; every component z is winsorized to ±4. Recomputed NVDA 2026-10-21 15:07:55Z: −3.75 → −0.83 (no signal).
+  signals.py sent_z already had max(std, 0.05) and a 5-run warmup (it gave −1.43 for the same run).
 - `edgar.py`: 8-K items + Form 4 buys/sells via data.sec.gov with a declared User-Agent (config sec.user_agent;
   put a real contact email there). As of 2026-10-21 SEC returns 403 "Undeclared Automated Tool" to this box's IP,
   so the step logs the block and the news gate relies on Benzinga/media.
@@ -266,9 +282,10 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
 - `alpaca_client.py` paper-only REST client (CLI: account | positions | orders | clock | quote | bars)
 - `volume_alerts.py`, `paper_trader.py` (v2), `newsgate.py`, `news.py`, `media.py`, `finsent.py`, `reddit.py`,
   `earnings.py`, `edgar.py`, `composite.py`, `collector.py`, `dashboard.py`, `config.json`
-- `tests/test_sources.py` media helpers, composite math, Form 4 parsing, earnings session logic
+- `tests/test_sources.py` media helpers, composite math + z hygiene (X warmup weight 0, std floors, ±4 cap, NVDA
+  2026-10-21 regression), Form 4 parsing, earnings session logic
 - `tests/test_trader.py` sizing (5%/20% caps, volatility sizing), bracket levels/ATR, paper-only URL guard,
-  news gate (fresh/stale/contradicting/SEC), v2 rules with a fake client, earnings pause/drift, evaluation slippage,
+  news gate (fresh/stale/contradicting/SEC; company focus: Cyclicals + SpaceX/chip-stocks rejected, genuine pass), v2 rules with a fake client, earnings pause/drift, evaluation slippage,
   ExitEnforcement (exits-only timing, short buy-back, earnings flat-by-15:40 incl. untracked, exit_due cap, lock, collector order)
 - `budget.py` ledger (`check N` / `record N note [--force]` / `status [--days K]`), cap 150/day UTC+8
 - `db.py` schema + helpers; DB `data/sentiment.db` (posts, post_batches, scores, counts, runs, signals,

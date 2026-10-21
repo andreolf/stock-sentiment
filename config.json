@@ -474,5 +474,60 @@
    "\\((Dist|Acc)\\)",
    "Kurs, Chart, Analysen"
   ]
+ },
+ "newsgate": {
+  "_note": "A qualifying headline must NAME the company: ticker as a word (case-sensitive) or $cashtag, or an alias below (case-insensitive, word boundaries) in the headline, or in the teaser when the headline is not a generic recap. Benzinga 'symbols' alone never counts. SEC 8-K / Form 4 filings for the ticker bypass this check. Approved by Francesco 2026-10-21 after the NVDA 'Cyclicals Top Sectors' false positive.",
+  "aliases": {
+   "TSLA": [
+    "Tesla",
+    "Elon Musk's Tesla"
+   ],
+   "NVDA": [
+    "Nvidia",
+    "NVIDIA"
+   ],
+   "PLTR": [
+    "Palantir"
+   ],
+   "AMD": [
+    "Advanced Micro Devices",
+    "Advanced Micro"
+   ],
+   "MSTR": [
+    "MicroStrategy",
+    "Strategy Inc"
+   ],
+   "HOOD": [
+    "Robinhood"
+   ],
+   "COIN": [
+    "Coinbase"
+   ],
+   "META": [
+    "Meta",
+    "Meta Platforms",
+    "Facebook"
+   ],
+   "SMCI": [
+    "Super Micro",
+    "Supermicro",
+    "Super Micro Computer"
+   ]
+  },
+  "generic_patterns": [
+   "\\bstocks? (moving|to watch|on the move|making (the )?(biggest )?moves?)\\b",
+   "\\b(biggest|top|big|other) (stock )?(movers|gainers|losers)\\b",
+   "\\bmovers?\\b.{0,20}\\b(premarket|pre-market|after[- ]hours|midday)\\b",
+   "\\b(market|stock market|midday|morning|closing) (wrap|recap|update|movers|snapshot)\\b",
+   "\\bsectors?\\b",
+   "\\b(here are|these) (the )?(top )?\\d+\\b",
+   "^\\d+ (stocks|names|tickers)\\b"
+  ],
+  "index_patterns": [
+   "\\b(Dow|S&P 500|S&P|Nasdaq|Russell 2000|Wall Street|stock market|equities|futures)\\b",
+   "\\b(chip|tech|AI|bank|EV|growth|meme|crypto|semiconductor|megacap|mega-cap|magnificent seven) stocks\\b",
+   "\\bstocks\\b"
+  ],
+  "_patterns_note": "generic_patterns: always rejected (market/sector recaps, movers lists). index_patterns: rejected unless the HEADLINE itself names the company (a teaser mention is not enough). Regexes, case-insensitive."
  }
 }

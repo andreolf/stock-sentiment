@@ -11,14 +11,20 @@ Raw components (latest values at run time):
   media_cnt_chg log((headlines last 6h + 1)/(mean 6h count over the prior 7 days + 1)); skipped until we
                 have collected media for >= 3 days (feeds only expose their latest items)
   price_vol     log(max IEX volume ratio over 5Min/15Min/1Hour) from volume_alerts (<= 90 min old)
-Each component is z-scored against this ticker's own composite history (last 14 days, >= 20 rows); until
-then a fixed warm-up scale is used (zmode='warmup'): x_sent/0.15, media_sent/0.15, log-ratios/0.5.
+X components (x_sent, x_vol) are z-scored against this ticker's PRIOR X RUNS (one row per regular batch in `runs`,
+last 14 days, current batch excluded), NOT against composite rows: the collector writes a composite row every
+5 min that repeats the same X value, which collapsed the std and produced z_x_sent -8.3 for NVDA on 2026-10-21.
+Fewer than MIN_X_RUNS (5) prior runs -> the X component gets weight 0 (z=None, note 'x warmup n/5').
+Other components are z-scored against this ticker's own composite history (last 14 days, before now, >= 20 rows
+and >= 5 distinct values); until then a fixed warm-up scale is used (zmode='warmup'): media_sent/0.15, log-ratios/0.5.
+Every std is floored (STD_FLOOR: 0.05 for sentiment, 0.25 for log-ratios) and every component z is winsorized to
++-Z_CAP (4) so a single component cannot dominate.
 Composite (signed): sentiment direction  S = mean(z_x_sent, z_media_sent) (available ones)
     attention A = mean(z_x_vol, z_reddit_chg, z_media_cnt_chg, z_price_vol) (available ones)
     composite = (S*1.0 + sign(S)*A*0.5) / sqrt(1 + 0.25)   if |S| >= 0.25, else S   (attention amplifies,
     never sets, the direction). Components missing -> skipped (logged in notes).
 If |composite| > 2: a HYPOTHETICAL signal type='composite' (follow + fade rows) is logged for evaluate.py.
-paper_trader.py ignores type='composite' (it only trades sentiment_shock). Debounce 2h per ticker.
+paper_trader.py treats the composite follow row as a trigger (still news-gated). Debounce 2h per ticker.
 """
 import argparse, math, statistics as st, sys
 from datetime import timedelta
@@ -27,6 +33,22 @@ import db, media
 SCALE = {"x_sent": 0.15, "x_vol": 0.5, "reddit_chg": 0.5, "media_sent": 0.15, "media_cnt_chg": 0.5, "price_vol": 0.5}
 COMPS = list(SCALE)
 SENT, ATT = ("x_sent", "media_sent"), ("x_vol", "reddit_chg", "media_cnt_chg", "price_vol")
+STD_FLOOR = {k: (0.05 if k in SENT else 0.25) for k in COMPS}   # sentiment in [-1,1]; others are log-ratios
+Z_CAP, MIN_X_RUNS, MIN_HIST = 4.0, 5, 20
+
+
+def clip(z):
+    return None if z is None else max(-Z_CAP, min(Z_CAP, z))
+
+
+def x_baseline(con, t, batch, before, scorer=None):
+    """Prior regular X runs (latest row per batch, current batch excluded, last 14 days, ts < before)."""
+    q = """SELECT w_sentiment, volume_ratio FROM runs WHERE id IN (SELECT MAX(id) FROM runs WHERE ticker=? AND batch<>?
+           AND batch NOT LIKE 'x-%' AND ts < ? AND ts >= ?""" + (" AND scorer=?" if scorer else "") + " GROUP BY batch)"
+    args = [t, batch or "", db.iso(before), db.iso(before - timedelta(days=14))] + ([scorer] if scorer else [])
+    rows = con.execute(q, args).fetchall()
+    return {"x_sent": [r[0] for r in rows if r[0] is not None],
+            "x_vol": [math.log(r[1]) for r in rows if r[1]]}
 
 
 def raw_components(con, t, now):
@@ -35,6 +57,7 @@ def raw_components(con, t, now):
     if r and db.parse_ts(r["ts"]) >= now - timedelta(hours=2):
         c["x_sent"] = r["w_sentiment"]
         c["x_vol"] = math.log(r["volume_ratio"]) if r["volume_ratio"] else None
+        c["_x_run"] = (r["batch"], db.parse_ts(r["ts"]), r["scorer"])
     else:
         notes.append("X stale")
     rc = con.execute("SELECT * FROM reddit_counts WHERE ticker=? AND source='apewisdom' ORDER BY ts DESC LIMIT 1", (t,)).fetchone()
@@ -60,21 +83,36 @@ def raw_components(con, t, now):
         c["price_vol"] = math.log(vs[0])
     else:
         notes.append("price vol stale")
-    return {k: c.get(k) for k in COMPS}, n6, notes
+    out = {k: c.get(k) for k in COMPS}
+    out["_x_run"] = c.get("_x_run")
+    return out, n6, notes
 
 
-def zscores(con, t, raw, now):
-    hist = con.execute("SELECT * FROM composite WHERE ticker=? AND ts>=?", (t, db.iso(now - timedelta(days=14)))).fetchall()
+def zscores(con, t, raw, now, notes=None):
+    """Per-component z (winsorized to +-Z_CAP, std floored). Returns (z, mode); appends warmup notes to `notes`."""
+    hist = con.execute("SELECT * FROM composite WHERE ticker=? AND ts>=? AND ts<?",
+                       (t, db.iso(now - timedelta(days=14)), db.iso(now))).fetchall()
+    xr = raw.get("_x_run")
+    xb = x_baseline(con, t, xr[0], xr[1], xr[2]) if xr else {"x_sent": [], "x_vol": []}
     z, mode = {}, "history"
     for k in COMPS:
         v = raw[k]
         if v is None:
             z[k] = None; continue
+        if k in xb:
+            h = xb[k]
+            if len(h) < MIN_X_RUNS:
+                z[k] = None
+                if notes is not None:
+                    notes.append(f"{k} warmup ({len(h)}/{MIN_X_RUNS} runs, weight 0)")
+                continue
+            z[k] = clip((v - st.mean(h)) / max(st.pstdev(h), STD_FLOOR[k]))
+            continue
         h = [r[k] for r in hist if r[k] is not None]
-        if len(h) >= 20 and st.pstdev(h) > 1e-9:
-            z[k] = (v - st.mean(h)) / st.pstdev(h)
+        if len(h) >= MIN_HIST and len({round(x, 6) for x in h}) >= 5:
+            z[k] = clip((v - st.mean(h)) / max(st.pstdev(h), STD_FLOOR[k]))
         else:
-            z[k] = v / SCALE[k]; mode = "warmup"
+            z[k] = clip(v / SCALE[k]); mode = "warmup"
     return z, mode
 
 
@@ -101,7 +139,7 @@ def main():
     print(f"composite @ {db.local(now)} ({a.source})")
     for t in tickers:
         raw, n6, notes = raw_components(con, t, now)
-        z, mode = zscores(con, t, raw, now)
+        z, mode = zscores(con, t, raw, now, notes)
         S, comp = combine(z)
         f = lambda v: "  n/a" if v is None else f"{v:+5.2f}"
         drivers = sorted([(k, v) for k, v in z.items() if v is not None], key=lambda kv: -abs(kv[1]))[:3]

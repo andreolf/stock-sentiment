@@ -179,6 +179,73 @@ class NewsGate(unittest.TestCase):
         self.assertIsNone(newsgate.hard_news(self.con, "PLTR", db.iso(self.now), "short"))   # insider buy != short
 
 
+class NewsGateCompanyFocus(unittest.TestCase):
+    """2026-10-21: a qualifying headline must name the company; generic recaps / basket lists never back a trade."""
+    def setUp(self):
+        self.con = CON; reset(self.con)
+        self.now = db.utcnow().replace(microsecond=0)
+
+    def add_bz(self, nid, ticker, headline, summary, symbols, ago_min=10, s=None):
+        self.con.execute("INSERT INTO news(id,ticker,created_at,headline,summary,source,symbols,sentiment) VALUES (?,?,?,?,?,?,?,?)",
+                         (nid, ticker, db.iso(self.now - timedelta(minutes=ago_min)), headline, summary, "benzinga", symbols, s))
+
+    def test_cyclicals_sector_recap_rejected_for_nvda(self):
+        self.add_bz("62499965", "NVDA", "Cyclicals Top Sectors In Wednesday Trading As Defensives Trail",
+                    "Five sectors are higher and six are lower in Wednesday's regular session, with cyclical sectors holding "
+                    "two of the top three positions alongside Technology.", "AAPL,AVGO,NVDA,QQQ,SPY,XLK")
+        rej = []
+        self.assertIsNone(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "short", rejected=rej))
+        self.assertEqual(len(rej), 1)
+
+    def test_spacex_chip_stocks_rejected_for_tsla(self):
+        h = "SpaceX Lifts All Boats: Chip Stocks Claw Back $274 Billion After a $1.6 Trillion Rout"
+        sm = "SpaceX earnings lift chip stocks as 26 AI hardware names recoup $274 billion premarket. SOXX, SMCI in focus."
+        for t in ("TSLA", "NVDA", "SMCI"):
+            self.add_bz("62494484", t, h, sm, "META,NVDA,SMCI,SOXX,SPCX,TSLA")
+        self.assertIsNone(newsgate.hard_news(self.con, "TSLA", db.iso(self.now), "long"))
+        self.assertIsNone(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "long"))
+        self.assertIsNone(newsgate.hard_news(self.con, "SMCI", db.iso(self.now), "long"))   # teaser mention, basket headline
+        # the same basket headline would count for TSLA only if it named Tesla
+        self.assertTrue(newsgate.about_company("TSLA", "SpaceX, Tesla Lift All Boats: Chip Stocks Claw Back $274 Billion")[0])
+
+    def test_genuine_headlines_pass(self):
+        self.add_bz("n1", "NVDA", "Amkor Secures $1.3 Billion NVIDIA Deal To Expand AI Packaging", "", "AMKR,NVDA")
+        self.assertEqual(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "long")["ref"], "n1")
+        self.add_bz("n2", "TSLA", "Elon Musk's Tesla-SpaceX Mega-Merger Could Create 'Most Unique Company'", "", "SPCX,TSLA")
+        self.assertEqual(newsgate.hard_news(self.con, "TSLA", db.iso(self.now), "long")["ref"], "n2")
+        self.add_bz("n3", "PLTR", "Watching $PLTR; Hearing SwingTrader Buys Stock", "", "PLTR")
+        self.assertEqual(newsgate.hard_news(self.con, "PLTR", db.iso(self.now), "long")["ref"], "n3")
+        ok = newsgate.about_company
+        self.assertTrue(ok("META", "Facebook parent faces EU fine over ad targeting")[0])
+        self.assertTrue(ok("META", "Meta's Zuckerberg unveils new glasses")[0])
+        self.assertTrue(ok("NVDA", "Nokia Teams Up With Partners On Nvidia-Based AI-RAN")[0])
+        self.assertTrue(ok("TSLA", "Elon Musk Hints at Chip Breakthroughs", "Tesla CEO said the AI5 chip ...")[0])   # teaser names it
+
+    def test_generic_and_basket_headlines_rejected(self):
+        ok = newsgate.about_company
+        for h in ("12 Information Technology Stocks Moving In Wednesday's Pre-Market Session",
+                  "Winnebago Posts Upbeat Q4 Earnings, Joins SpaceX, Super Micro Computer And Other Big Stocks Moving",
+                  "5 Stocks To Watch This Week", "Stock Market Wrap: Dow Gains 300 Points", "Midday movers: Dell, Nvidia",
+                  "Here Are Top 5 Initiations For Wednesday"):
+            self.assertFalse(ok("SMCI" if "Super" in h else "NVDA", h)[0], h)
+        self.assertFalse(ok("NVDA", "Nasdaq Climbs As Tech Rebounds", "Nvidia led gains")[0])      # index headline, teaser only
+        self.assertTrue(ok("NVDA", "Nasdaq Climbs As Nvidia Surges 5% On China Deal")[0])          # index headline naming it
+        self.assertFalse(ok("NVDA", "Why Is Dell Stock Surging Wednesday?", "Dell, which partners with Nvidia ...")[0])
+        self.assertFalse(ok("NVDA", "Ken Griffin Calls AI a Bubble", "")[0])                       # symbols tag only
+        self.assertFalse(ok("COIN", "Bitcoin coin prices jump")[0])                                 # ticker word is case-sensitive
+
+    def test_media_rows_need_company_too(self):
+        self.con.execute("INSERT INTO media(id,ticker,created_at,outlet,tier,title,sentiment) VALUES (?,?,?,?,?,?,?)",
+                         ("m1", "NVDA", db.iso(self.now - timedelta(minutes=5)), "CNBC", 1, "Stock market today: Dow, S&P 500 slip", -0.3))
+        self.assertIsNone(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "short"))
+
+    def test_sec_filing_still_counts_without_headline(self):
+        self.add_bz("g1", "NVDA", "Cyclicals Top Sectors In Wednesday Trading As Defensives Trail", "", "NVDA,SPY")
+        self.con.execute("INSERT INTO sec_filings(accession,ticker,form,filed_at,items) VALUES (?,?,?,?,?)",
+                         ("a9", "NVDA", "8-K", db.iso(self.now - timedelta(minutes=5)), "8.01"))
+        self.assertEqual(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "short")["kind"], "sec")
+
+
 class FakeClient:
     def __init__(self, positions=None, is_open=True, equity=100_000):
         self.placed, self.cancelled, self.closed = [], [], []

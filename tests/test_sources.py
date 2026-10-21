@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for media parsing helpers, composite combination, Form 4 parsing, earnings session logic. No network."""
-import os, sys, tempfile, unittest
+import math, os, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["STOCK_SENT_DB"] = os.path.join(tempfile.mkdtemp(), "s.db")
 import media, composite, edgar, earnings
@@ -31,6 +31,60 @@ class Composite(unittest.TestCase):
         self.assertLess(c, S)                                   # attention amplifies the bearish direction
         self.assertEqual(composite.combine({**z, "x_sent": 0.1, "media_sent": 0.0})[1], 0.05)   # weak S: attention ignored
         self.assertEqual(composite.combine({"x_sent": None, "media_sent": None, "x_vol": 5})[1], None)
+
+
+class CompositeZ(unittest.TestCase):
+    """2026-10-21: X z vs prior X runs (not repeated collector rows), std floors, >=5-run warmup, winsorize +-4."""
+    def setUp(self):
+        import db
+        from datetime import timedelta
+        self.db, self.td = db, timedelta
+        self.con = db.connect(os.path.join(tempfile.mkdtemp(), "cz.db"))   # own DB: other modules hold open txns
+        self.now = db.utcnow().replace(microsecond=0)
+
+    def tearDown(self):
+        self.con.close()
+
+    def add_run(self, i, ws, vr):
+        ts = self.db.iso(self.now - self.td(minutes=30 * (10 - i)))
+        self.con.execute("INSERT INTO runs(ts,ticker,batch,scorer,n_posts,w_sentiment,volume_ratio,status) VALUES (?,?,?,?,?,?,?,?)",
+                         (ts, "NVDA", f"b{i}", "agent", 25, ws, vr, "ok"))
+
+    def raw(self, ws, vr, batch="cur"):
+        r = {k: None for k in composite.COMPS}
+        r.update(x_sent=ws, x_vol=math.log(vr), _x_run=(batch, self.now, "agent"))
+        return r
+
+    def test_x_warmup_weight_zero(self):
+        for i, ws in enumerate([0.12, 0.18, 0.17, 0.19]):
+            self.add_run(i, ws, 1.5)
+        notes = []
+        z, _ = composite.zscores(self.con, "NVDA", self.raw(0.095, 1.6), self.now, notes)
+        self.assertIsNone(z["x_sent"]); self.assertIsNone(z["x_vol"])
+        self.assertTrue(any("x_sent warmup (4/5" in n for n in notes))
+        self.assertIsNone(composite.combine(z)[1])          # nothing else available -> no composite at all
+
+    def test_nvda_2026_10_21_regression(self):
+        for i, (ws, vr) in enumerate([(0.125, 1.072), (0.184, 1.783), (0.172, 1.940), (0.189, 2.043), (0.165, 1.745)]):
+            self.add_run(i, ws, vr)
+        # 20 collector rows that all repeat the same X value (what produced z_x_sent -8.3)
+        for m in range(20):
+            self.con.execute("INSERT INTO composite(ts,ticker,source,x_sent,x_vol) VALUES (?,?,?,?,?)",
+                             (self.db.iso(self.now - self.td(minutes=5 * (m + 1))), "NVDA", "collector", 0.165, 0.557))
+        z, _ = composite.zscores(self.con, "NVDA", self.raw(0.0954, 1.596), self.now, [])
+        self.assertAlmostEqual(z["x_sent"], (0.0954 - 0.167) / 0.05, delta=0.05)   # std 0.023 floored at 0.05 -> ~-1.43
+        self.assertGreater(z["x_vol"], -1.0)
+
+    def test_floor_and_winsorize(self):
+        for i in range(6):
+            self.add_run(i, 0.20, 2.0)                       # zero-variance baseline
+        z, _ = composite.zscores(self.con, "NVDA", self.raw(-0.9, 40.0), self.now, [])
+        self.assertEqual(z["x_sent"], -composite.Z_CAP)      # (-1.1/0.05 = -22) clipped to -4
+        self.assertEqual(z["x_vol"], composite.Z_CAP)
+        z, _ = composite.zscores(self.con, "NVDA", self.raw(0.22, 2.0), self.now, [])
+        self.assertAlmostEqual(z["x_sent"], 0.4)             # 0.02 / floor 0.05, not /1e-9
+        r = {k: None for k in composite.COMPS}; r["media_sent"] = 0.9
+        self.assertEqual(composite.zscores(self.con, "NVDA", r, self.now, [])[0]["media_sent"], composite.Z_CAP)  # warmup scale clipped too
 
 
 class Form4(unittest.TestCase):
