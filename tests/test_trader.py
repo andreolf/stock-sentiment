@@ -477,7 +477,10 @@ class ExitEnforcement(unittest.TestCase):
 
     def test_entry_exit_due_capped_and_blocked_after_cut(self):
         self.earnings("TSLA", "after-hours")
-        for when, expect_trade in ((self.at(15, 0), True), (self.at(15, 42), False)):
+        # 14:50 ET: trades, but its 60-min exit (15:50) would fall into the report -> capped to 15:40.
+        # 15:00 ET and later: no new entries at all in a ticker reporting after today's close.
+        for when, expect_trade in ((self.at(14, 50), True), (self.at(14, 59, 59), True), (self.at(15, 0), False),
+                                   (self.at(15, 20), False), (self.at(15, 42), False)):
             reset(self.con); self.earnings("TSLA", "after-hours")
             self.con.execute("""INSERT INTO volume_spikes(ts,ticker,timeframe,detected_at,ratio,ret_pct,direction,flagged)
                                 VALUES (?,?,?,?,?,?,?,1)""", (db.iso(when - timedelta(minutes=10)), "TSLA", "5Min",
@@ -494,6 +497,20 @@ class ExitEnforcement(unittest.TestCase):
             else:
                 self.assertIn("earnings after close", self.con.execute(
                     "SELECT reason FROM decisions WHERE action='hypothetical' AND rule='v2_news_momentum'").fetchone()[0])
+
+    def test_entry_cutoff_only_for_earnings_ticker(self):
+        # NVDA has no report today: still tradable at 15:20 ET (its own 60-min exit is enforced by flat-before-close)
+        self.earnings("TSLA", "after-hours")
+        when = self.at(15, 20)
+        self.con.execute("""INSERT INTO volume_spikes(ts,ticker,timeframe,detected_at,ratio,ret_pct,direction,flagged)
+                            VALUES (?,?,?,?,?,?,?,1)""", (db.iso(when - timedelta(minutes=10)), "NVDA", "5Min",
+                                                         db.iso(when - timedelta(minutes=4)), 4.2, 0.6, "up"))
+        self.con.execute("INSERT INTO media(id,ticker,created_at,outlet,tier,title,sentiment) VALUES (?,?,?,?,?,?,?)",
+                         ("n2", "NVDA", db.iso(when - timedelta(minutes=20)), "Reuters", 1,
+                          "Nvidia raises guidance after record data center sales", 0.6))
+        self.con.commit()
+        fc = FakeClient(); self.trader(fc, when).run(); self.con.commit()
+        self.assertEqual(len(fc.placed), 1)
 
     def test_next_exit_due(self):
         import paper_trader

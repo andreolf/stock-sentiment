@@ -28,7 +28,8 @@ Exits: bracket legs on Alpaca; time exit when exit_due passes (60 min, earnings:
 EARNINGS HARD RULE: any open position (tracked or not) in a ticker with earnings after today's close (earnings table,
   date = today ET, time_of_day not pre-market; unknown time counts as after-hours) is flattened once ET time >=
   earnings_flat_by_et (15:40) so it is flat before 15:45 ET; new entries in such a ticker get exit_due capped at that
-  time, and after it no new entry is opened (hypothetical "earnings after close today").
+  time (so no time exit ever falls after the release), and after earnings_no_entry_after_et (15:00 ET) no new entry is
+  opened in such a ticker (hypothetical "earnings after close today").
 Unfilled entries are cancelled after entry_timeout_min (10). Every run first reconciles open paper orders.
 Kill switch: data/KILL or trading_enabled=false -> no new entries (exits still managed).
 DRY RUN (default): reads Alpaca, places/cancels nothing and writes nothing.
@@ -50,7 +51,7 @@ DEFAULTS = {"trading_enabled": True, "max_trade_pct": 0.05, "max_total_pct": 0.2
             "atr_mult_stop": 1.5, "tp_mult": 2.0, "min_stop_pct": 0.4, "max_stop_pct": 4.0, "news_window_min": 60,
             "news_novelty_min": 0.5, "news_min_tier": 2, "earnings_hold_until_et": "15:45",
             "earnings_entry_after_et": "10:00", "bracket": True,
-            "earnings_flat_by_et": "15:40"}
+            "earnings_flat_by_et": "15:40", "earnings_no_entry_after_et": "15:00"}
 
 
 # ---------- pure helpers (unit-tested) ----------
@@ -364,6 +365,7 @@ class Trader:
         eidx, etrade = self.earnings_state()
         earn_today = after_close_earnings_today(self.con, self.now)
         earn_cut = et_at(self.now, self.cfg["earnings_flat_by_et"])
+        earn_no_entry = et_at(self.now, self.cfg.get("earnings_no_entry_after_et", "15:00"))
 
         def try_trade(rule, trig, direction, news_ref, exit_due, note):
             side = "buy" if direction == "long" else "sell"
@@ -376,8 +378,8 @@ class Trader:
                 why = "market closed"
             elif trig["ticker"] in state["held"]:
                 why = "already have position/order in ticker"
-            elif trig["ticker"].upper() in earn_today and self.now >= earn_cut:
-                why = "earnings after close today (past flat-by time)"
+            elif trig["ticker"].upper() in earn_today and self.now >= earn_no_entry:
+                why = "earnings after close today (no new entries after %s ET)" % self.cfg.get("earnings_no_entry_after_et", "15:00")
             elif side == "sell" and not self.shortable(trig["ticker"]):
                 why = "not shortable / shorts disabled"
             lp = self.quote_limit(trig["ticker"], side) if not why else None
