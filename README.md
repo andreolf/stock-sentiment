@@ -75,3 +75,7 @@ export ALPACA_PAPER_SECRET_KEY=...
 
 The SQLite database, raw X results, agent score files, logs, the X budget ledger and any `.env` live in `data/`
 and are git-ignored. No API keys are stored anywhere in the code: Alpaca paper keys come only from the environment.
+
+---
+
+Built with ❤️ by Francesco Andreoli ([@francescoswiss](https://x.com/francescoswiss))

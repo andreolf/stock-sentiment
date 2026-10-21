@@ -314,10 +314,12 @@ h1{{font-size:19px;margin:0;font-weight:600}}h2{{font-size:15px;margin:0 0 10px;
 th{{text-align:left;color:var(--mut);font-weight:500;border-bottom:1px solid var(--line);padding:6px 8px;white-space:nowrap}}
 td{{border-bottom:1px solid #21262d;padding:6px 8px;vertical-align:top}}tr:hover td{{background:#1c2128}}
 .pos{{color:var(--pos)}}.neg{{color:var(--neg)}}.empty{{color:var(--mut);font-style:italic;padding:6px 0}}a{{color:var(--fg);text-decoration:none}}a:hover{{color:var(--acc)}}
+footer{{padding:16px 26px;border-top:1px solid var(--line);color:var(--mut);font-size:13px;text-align:center}}a.credit{{color:var(--acc)}}a.credit:hover{{text-decoration:underline}}
 .pill{{display:inline-block;padding:1px 8px;border-radius:10px;background:#1f6feb33;color:var(--acc);font-size:12px}}
 </style></head><body>
 <header><div><h1>X-sentiment paper desk <span class="pill">PAPER ONLY</span></h1>
 <div class="mut">TSLA · NVDA · PLTR core, IEX volume watchlist: {e(", ".join(allw))}</div></div>
+<div class="mut">Built with ❤️ by Francesco Andreoli (<a class="credit" href="https://x.com/francescoswiss" target="_blank" rel="noopener">@francescoswiss</a>)</div>
 <div class="mut">Generated {gen} (Europe/Zurich). All times on this page are Zurich time.</div></header>
 <main>
 <section class="kpis">{kpis}</section>
@@ -353,6 +355,7 @@ td{{border-bottom:1px solid #21262d;padding:6px 8px;vertical-align:top}}tr:hover
 </section>
 <div class="mut">Research and paper trading only. Prices: Alpaca IEX (thin slice of volume) and yfinance (unofficial). X counts: keyword queries, retweets excluded.</div>
 </main>
+<footer>Built with ❤️ by Francesco Andreoli (<a class="credit" href="https://x.com/francescoswiss" target="_blank" rel="noopener">@francescoswiss</a>) · <a class="credit" href="https://github.com/andreolf/stock-sentiment" target="_blank" rel="noopener">GitHub repo</a></footer>
 <script>
 const D={json.dumps(data)};
 const fmt=new Intl.DateTimeFormat('en-GB',{{timeZone:'Europe/Zurich',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}});
