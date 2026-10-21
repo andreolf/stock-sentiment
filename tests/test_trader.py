@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+"""Unit tests: sizing (incl. volatility sizing), bracket levels/ATR, paper-only URL guard, news gate, v2 trading
+rules (fake Alpaca client, temp DB), earnings pause/drift, evaluation slippage + random baseline.
+Run: .venv/bin/python -m unittest tests/test_trader.py -v   (no network, never touches Alpaca)"""
+import os, sys, tempfile, unittest
+from datetime import timedelta
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ["STOCK_SENT_DB"] = os.path.join(tempfile.mkdtemp(), "t.db")
+import db, newsgate, evaluate
+from alpaca_client import AlpacaPaper, PaperOnlyError, guard_url
+from paper_trader import Trader, size_qty, limit_price, exposure_of, atr, bracket_levels
+
+
+class Sizing(unittest.TestCase):
+    def test_max_5pct_per_trade(self):
+        self.assertEqual(size_qty(100_000, 0, 100), 50)
+        self.assertLessEqual(size_qty(100_000, 0, 380.45) * 380.45, 5_000)
+
+    def test_max_20pct_total(self):
+        self.assertEqual(size_qty(100_000, 18_000, 100), 20)
+        self.assertEqual(size_qty(100_000, 20_000, 100), 0)
+        self.assertEqual(size_qty(100_000, 25_000, 100), 0)
+        self.assertEqual(size_qty(100_000, -18_000, 100), 20)
+
+    def test_volatility_sizing(self):
+        # risk 0.5% of 100k = $500; stop $2 -> 250 sh, but 5% cap ($5k @ $100) -> 50
+        self.assertEqual(size_qty(100_000, 0, 100, stop_dist=2, risk_pct=0.5), 50)
+        # wide stop $25 -> 20 sh (risk binds, below the 5% cap)
+        self.assertEqual(size_qty(100_000, 0, 100, stop_dist=25, risk_pct=0.5), 20)
+        # risk sizing never exceeds the 20% total cap
+        self.assertEqual(size_qty(100_000, 19_500, 100, stop_dist=0.5, risk_pct=0.5), 5)
+
+    def test_degenerate(self):
+        for args in [(0, 0, 100), (100_000, 0, 0), (100_000, 0, None), (-5, 0, 10)]:
+            self.assertEqual(size_qty(*args), 0)
+        self.assertEqual(size_qty(100_000, 0, 6000), 0)
+
+    def test_exposure_ignores_bracket_legs_of_held_symbols(self):
+        pos = [{"symbol": "TSLA", "market_value": "4000"}, {"symbol": "NVDA", "market_value": "-3000"}]
+        orders = [{"symbol": "PLTR", "type": "limit", "qty": "10", "filled_qty": "4", "limit_price": "100"},
+                  {"symbol": "TSLA", "type": "limit", "qty": "10", "filled_qty": "0", "limit_price": "420"}]
+        self.assertAlmostEqual(exposure_of(pos, orders), 7_600)
+
+
+class Levels(unittest.TestCase):
+    def test_mid_offset(self):
+        self.assertEqual(limit_price("buy", 99.9, 100.1, offset_bps=5), 100.05)
+        self.assertEqual(limit_price("sell", 99.9, 100.1, offset_bps=5), 99.95)
+        self.assertEqual(limit_price("buy", 0, 0, last=200, offset_bps=0), 200)
+        self.assertEqual(limit_price("buy", 90, 110, last=100, offset_bps=0), 100)
+        self.assertIsNone(limit_price("buy", None, None, None))
+
+    def test_atr(self):
+        bars = [{"h": 101, "l": 99, "c": 100}] * 20
+        self.assertAlmostEqual(atr(bars), 2.0)
+        self.assertIsNone(atr(bars[:1]))
+
+    def test_bracket_levels(self):
+        sl, tp, d = bracket_levels("buy", 100, 1.0)              # 1.5 x 1.0 = 1.5 -> within 0.4%..4%
+        self.assertEqual((sl, tp, d), (98.5, 103.0, 1.5))
+        sl, tp, d = bracket_levels("sell", 100, 1.0)
+        self.assertEqual((sl, tp), (101.5, 97.0))
+        self.assertEqual(bracket_levels("buy", 100, 0.01)[2], 0.4)   # min clamp 0.4%
+        self.assertEqual(bracket_levels("buy", 100, 10)[2], 4.0)     # max clamp 4%
+        self.assertEqual(bracket_levels("buy", 100, None)[2], 0.4)
+
+
+class PaperGuard(unittest.TestCase):
+    def setUp(self):
+        self.c = AlpacaPaper("k", "s")
+
+    def test_guard_url(self):
+        guard_url("https://paper-api.alpaca.markets/v2/orders")
+        guard_url("https://data.alpaca.markets/v2/stocks/bars?x=1")
+        guard_url("https://data.alpaca.markets/v1beta1/news?symbols=TSLA")
+        for bad in ["https://api.alpaca.markets/v2/orders", "http://paper-api.alpaca.markets/v2/orders",
+                    "https://paper-api.alpaca.markets.evil.com/v2/orders", "https://paper-api.alpaca.markets@evil.com/v2/",
+                    "https://broker-api.alpaca.markets/v1/", "https://data.alpaca.markets/v1beta3/crypto", None]:
+            with self.assertRaises(PaperOnlyError, msg=bad):
+                guard_url(bad)
+
+    def test_constructor_rejects_live(self):
+        with self.assertRaises(PaperOnlyError):
+            AlpacaPaper("k", "s", trading_base="https://api.alpaca.markets/v2")
+        with self.assertRaises(PaperOnlyError):
+            AlpacaPaper("k", "s", data_base="https://example.com/v2")
+
+    def test_request_never_opens_socket_for_live(self):
+        with mock.patch("urllib.request.urlopen") as uo:
+            with self.assertRaises(PaperOnlyError):
+                self.c._request("POST", "https://api.alpaca.markets/v2/orders", body={"symbol": "TSLA"})
+            uo.assert_not_called()
+
+    def _capture(self, fn):
+        seen = []
+        def fake(req, timeout=None):
+            seen.append((req.full_url, req.data))
+            class R:
+                def __enter__(s): return s
+                def __exit__(s, *a): return False
+                def read(s): return b'{"id":"x","status":"new"}'
+            return R()
+        with mock.patch("urllib.request.urlopen", fake):
+            fn()
+        return seen
+
+    def test_orders_go_to_paper_host(self):
+        seen = self._capture(lambda: self.c.place_limit_order("TSLA", 3, "buy", 100.123))
+        self.assertTrue(seen[0][0].startswith("https://paper-api.alpaca.markets/v2/orders"))
+
+    def test_bracket_order_body(self):
+        import json
+        seen = self._capture(lambda: self.c.place_bracket_order("TSLA", 3, "buy", 100, 103, 98.5))
+        self.assertTrue(seen[0][0].startswith("https://paper-api.alpaca.markets/v2/orders"))
+        b = json.loads(seen[0][1])
+        self.assertEqual((b["order_class"], b["take_profit"]["limit_price"], b["stop_loss"]["stop_price"]), ("bracket", "103.00", "98.50"))
+        with self.assertRaises(ValueError):
+            self.c.place_bracket_order("TSLA", 3, "buy", 100, 98, 103)      # stop above entry for a buy
+        with self.assertRaises(ValueError):
+            self.c.place_bracket_order("TSLA", 3, "sell", 100, 103, 98.5)   # tp above entry for a sell
+
+    def test_repr_hides_keys(self):
+        self.assertNotIn("SECRET456", repr(AlpacaPaper("KEYID123", "SECRET456")))
+        self.assertNotIn("KEYID123", repr(AlpacaPaper("KEYID123", "SECRET456")))
+
+    def test_bad_order_args(self):
+        with self.assertRaises(ValueError):
+            self.c.place_limit_order("TSLA", 0, "buy", 100)
+        with self.assertRaises(ValueError):
+            self.c.place_limit_order("TSLA", 1, "short", 100)
+
+
+CON = db.connect()   # one shared connection: separate ones would deadlock on uncommitted test inserts
+
+
+def reset(con):
+    con.rollback()
+    for t in ("signals", "volume_spikes", "paper_trades", "decisions", "media", "news", "sec_filings", "earnings_events",
+              "decision_returns", "random_baseline"):
+        con.execute(f"DELETE FROM {t}")
+    con.commit()
+
+
+class NewsGate(unittest.TestCase):
+    def setUp(self):
+        self.con = CON; reset(self.con)
+        self.now = db.utcnow().replace(microsecond=0)
+
+    def add_media(self, title, ago_min, tier=1, s=0.5, mid=None):
+        self.con.execute("INSERT INTO media(id,ticker,created_at,outlet,tier,title,sentiment) VALUES (?,?,?,?,?,?,?)",
+                         (mid or title[:12], "TSLA", db.iso(self.now - timedelta(minutes=ago_min)), "Reuters", tier, title, s))
+
+    def test_fresh_novel_headline(self):
+        self.add_media("Tesla recalls 200,000 vehicles over brake software", 20, s=-0.6)
+        n = newsgate.hard_news(self.con, "TSLA", db.iso(self.now), "short")
+        self.assertEqual(n["kind"], "media")
+
+    def test_stale_repeat_rejected(self):
+        self.add_media("Tesla and SpaceX explore merger, Musk says", 600, mid="old")
+        self.add_media("Musk says Tesla and SpaceX explore merger", 15, mid="new")
+        self.assertIsNone(newsgate.hard_news(self.con, "TSLA", db.iso(self.now), "long"))
+
+    def test_too_old_and_contradicting(self):
+        self.add_media("Tesla wins giant robotaxi contract in Texas", 120, s=0.8)       # outside 60 min
+        self.assertIsNone(newsgate.hard_news(self.con, "TSLA", db.iso(self.now), "long"))
+        self.add_media("Tesla shares plunge after guidance cut", 10, s=-0.8)
+        self.assertIsNone(newsgate.hard_news(self.con, "TSLA", db.iso(self.now), "long"))  # contradicts long
+        self.assertIsNotNone(newsgate.hard_news(self.con, "TSLA", db.iso(self.now), "short"))
+
+    def test_sec(self):
+        self.con.execute("INSERT INTO sec_filings(accession,ticker,form,filed_at,items) VALUES (?,?,?,?,?)",
+                         ("a1", "TSLA", "8-K", db.iso(self.now - timedelta(minutes=5)), "2.02,9.01"))
+        self.con.execute("INSERT INTO sec_filings(accession,ticker,form,filed_at,buy_value) VALUES (?,?,?,?,?)",
+                         ("a2", "PLTR", "4", db.iso(self.now - timedelta(minutes=5)), 250000))
+        self.assertEqual(newsgate.hard_news(self.con, "TSLA", db.iso(self.now), "short")["kind"], "sec")
+        self.assertEqual(newsgate.hard_news(self.con, "PLTR", db.iso(self.now), "long")["kind"], "sec")
+        self.assertIsNone(newsgate.hard_news(self.con, "PLTR", db.iso(self.now), "short"))   # insider buy != short
+
+
+class FakeClient:
+    def __init__(self, positions=None, is_open=True, equity=100_000):
+        self.placed, self.cancelled, self.closed = [], [], []
+        self._pos = positions or []
+        self.is_open, self.equity = is_open, equity
+        self.orders_by_id = {}
+    def account(self): return {"equity": str(self.equity), "cash": str(self.equity)}
+    def clock(self): return {"is_open": self.is_open, "next_close": "2099-01-01T20:00:00Z"}
+    def positions(self): return self._pos
+    def orders(self, status="open", **kw): return [o for o in self.orders_by_id.values() if o["status"] == "new"]
+    def latest_quote(self, s): return {"bp": 99.95, "ap": 100.05}
+    def latest_trade(self, s): return {"p": 100.0}
+    def asset(self, s): return {"shortable": True, "easy_to_borrow": True}
+    def bars(self, s, tf, start=None, **kw): return {s: [{"h": 101, "l": 99, "c": 100}] * 20}   # ATR 2 -> stop 3%
+    def calendar(self, a, b):
+        import pandas as pd
+        return [{"date": str(d.date())} for d in pd.bdate_range(a, b)]
+    def get_order(self, oid): return self.orders_by_id[oid]
+    def cancel_order(self, oid): self.cancelled.append(oid)
+    def close_position(self, sym):
+        self.closed.append(sym); self._pos = [p for p in self._pos if p["symbol"] != sym]
+        o = {"id": f"c{len(self.closed)}", "symbol": sym, "status": "filled", "type": "market", "filled_qty": "49",
+             "filled_avg_price": "100.5"}
+        self.orders_by_id[o["id"]] = o
+        return {**o, "status": "new"}
+    def place_bracket_order(self, sym, qty, side, lp, tp, sl, client_order_id=None, **kw):
+        oid = f"o{len(self.placed)+1}"
+        o = {"id": oid, "symbol": sym, "qty": str(qty), "side": side, "status": "new", "type": "limit",
+             "limit_price": str(lp), "tp": tp, "sl": sl, "filled_qty": "0"}
+        self.orders_by_id[oid] = o; self.placed.append(o); return o
+
+
+class TraderV2(unittest.TestCase):
+    def setUp(self):
+        self.con = CON; reset(self.con)
+        self.now = db.utcnow().replace(microsecond=0)
+
+    def spike(self, direction="up", ticker="TSLA"):
+        self.con.execute("""INSERT INTO volume_spikes(ts,ticker,timeframe,detected_at,ratio,ret_pct,direction,flagged)
+                            VALUES (?,?,?,?,?,?,?,1)""", (db.iso(self.now - timedelta(minutes=10)), ticker, "5Min",
+                                                         db.iso(self.now - timedelta(minutes=4)), 4.2,
+                                                         0.6 if direction == "up" else -0.6, direction))
+
+    def shock(self, d="long"):
+        for variant, dd in (("follow", d), ("fade", "short" if d == "long" else "long")):
+            self.con.execute("INSERT INTO signals(ts,ticker,type,variant,zscore,volume_ratio,direction,price) VALUES (?,?,?,?,?,?,?,?)",
+                             (db.iso(self.now - timedelta(minutes=5)), "TSLA", "sentiment_shock", variant, 2.6, 4.0, dd, 100))
+
+    def news(self, title="Tesla raises delivery guidance after record China sales", s=0.6):
+        self.con.execute("INSERT INTO media(id,ticker,created_at,outlet,tier,title,sentiment) VALUES (?,?,?,?,?,?,?)",
+                         ("n1", "TSLA", db.iso(self.now - timedelta(minutes=20)), "Reuters", 1, title, s))
+
+    def run_t(self, fc, live=True, now=None):
+        Trader(fc, self.con, {}, live=live, now=now or self.now, kill_path="/nonexistent/KILL", core=["TSLA", "NVDA", "PLTR"]).run()
+        self.con.commit()
+
+    def rules(self):
+        return {(r["rule"], r["trigger_type"]): (r["action"], r["direction"]) for r in self.con.execute("SELECT * FROM decisions")}
+
+    def test_spike_with_fresh_news_trades_bracket(self):
+        self.spike("up"); self.news(); self.con.commit()
+        fc = FakeClient(); self.run_t(fc)
+        self.assertEqual(len(fc.placed), 1)
+        o = fc.placed[0]
+        # entry 100.05, ATR 2 x1.5 = 3.0 -> stop 97.05, tp 106.05; risk $500/3 = 166 sh but 5% cap -> 49
+        self.assertEqual((o["side"], o["qty"], o["limit_price"], o["sl"], o["tp"]), ("buy", "49", "100.05", 97.05, 106.05))
+        self.assertEqual(self.rules()[("v2_news_momentum", "volume_spike")], ("trade", "long"))
+        pt = self.con.execute("SELECT * FROM paper_trades").fetchone()
+        self.assertEqual(pt["alpaca_order_id"], "o1")
+        self.run_t(fc)                                   # idempotent
+        self.assertEqual(len(fc.placed), 1)
+
+    def test_attention_only_is_fade_hypothetical(self):
+        self.spike("up"); self.con.commit()
+        fc = FakeClient(); self.run_t(fc)
+        self.assertEqual(fc.placed, [])
+        self.assertEqual(self.rules()[("v2_attention_fade", "volume_spike")], ("hypothetical", "short"))
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0], 0)
+
+    def test_stale_news_does_not_count(self):
+        self.con.execute("INSERT INTO media(id,ticker,created_at,outlet,tier,title,sentiment) VALUES (?,?,?,?,?,?,?)",
+                         ("old", "TSLA", db.iso(self.now - timedelta(hours=8)), "CNBC", 1,
+                          "Tesla raises delivery guidance after record China sales", 0.6))
+        self.spike("up"); self.news(); self.con.commit()          # same story again 20 min ago
+        fc = FakeClient(); self.run_t(fc)
+        self.assertEqual(fc.placed, [])
+
+    def test_v1_logged_for_comparison(self):
+        self.shock("long"); self.spike("up"); self.con.commit()
+        fc = FakeClient(); self.run_t(fc)
+        r = self.rules()
+        self.assertEqual(r[("v1_follow_spike", "sentiment_shock")][0], "hypothetical")
+        self.assertIn("WOULD trade", self.con.execute("SELECT reason FROM decisions WHERE rule='v1_follow_spike'").fetchone()[0])
+        self.assertEqual(fc.placed, [])                  # no news -> v2 does not trade
+
+    def test_dry_run_writes_nothing(self):
+        self.spike("up"); self.news(); self.con.commit()
+        fc = FakeClient(); self.run_t(fc, live=False)
+        self.assertEqual(fc.placed, [])
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 0)
+
+    def test_market_closed_and_cap(self):
+        self.spike("up"); self.news(); self.con.commit()
+        fc = FakeClient(is_open=False); self.run_t(fc)
+        self.assertEqual(fc.placed, [])
+        self.assertIn("market closed", self.con.execute("SELECT reason FROM decisions").fetchone()[0])
+        reset(self.con); self.spike("up"); self.news(); self.con.commit()
+        fc = FakeClient(positions=[{"symbol": "NVDA", "qty": "80", "market_value": "18000", "avg_entry_price": "225", "unrealized_plpc": "0"}])
+        self.run_t(fc)
+        self.assertEqual(fc.placed[0]["qty"], "19")
+
+    def test_time_exit_closes_position(self):
+        self.spike("up"); self.news(); self.con.commit()
+        fc = FakeClient(); self.run_t(fc)
+        fc.orders_by_id["o1"].update(status="filled", filled_qty="49", filled_avg_price="100.02")
+        fc._pos = [{"symbol": "TSLA", "qty": "49", "market_value": "4900", "avg_entry_price": "100.02", "unrealized_plpc": "0.001"}]
+        self.run_t(fc, now=self.now + timedelta(minutes=61))
+        self.assertEqual(fc.closed, ["TSLA"])
+        self.run_t(fc, now=self.now + timedelta(minutes=66))   # position gone -> entry closed
+        self.assertIsNotNone(self.con.execute("SELECT closed_at FROM paper_trades WHERE purpose='entry'").fetchone()[0])
+
+    def _event(self, agree, rx_offset_days=0):
+        import pandas as pd
+        rx = (pd.Timestamp(self.now.astimezone(db.ZoneInfo("America/New_York")).date()) - pd.offsets.BDay(rx_offset_days)).date()
+        self.con.execute("""INSERT INTO earnings_events(ticker, report_date, time_of_day, eps_actual, eps_estimate, surprise_pct,
+                            reaction_date, gap_pct, news_sent, direction, agree) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                         ("TSLA", str(rx - timedelta(days=1)), "after-hours", 0.55, 0.45, 22.2, str(rx), 3.1, 0.3, "long", agree))
+
+    def test_earnings_pause_blocks_sentiment_trade(self):
+        self._event(agree=0)
+        self.spike("up"); self.news(); self.con.commit()
+        fc = FakeClient(); self.run_t(fc)
+        self.assertEqual(fc.placed, [])
+        self.assertIn("earnings_pause", self.con.execute("SELECT reason FROM decisions").fetchone()[0])
+
+    def test_earnings_drift_trades_when_agree(self):
+        self._event(agree=1, rx_offset_days=1)          # today = reaction day 2 -> no pause, drift allowed
+        self.con.commit()
+        et = db.ZoneInfo("America/New_York")
+        at = self.now.astimezone(et).replace(hour=11, minute=0).astimezone(db.timezone.utc)
+        fc = FakeClient(); self.run_t(fc, now=at)
+        self.assertEqual(len(fc.placed), 1)
+        self.assertEqual(self.rules()[("earnings_drift", "earnings")], ("trade", "long"))
+        due = self.con.execute("SELECT exit_due FROM paper_trades").fetchone()[0]
+        self.assertEqual(db.parse_ts(due).astimezone(et).strftime("%H:%M"), "15:45")
+
+
+class Evaluation(unittest.TestCase):
+    def test_slippage_and_random_baseline(self):
+        con = CON; reset(con)
+        ts = db.iso(db.utcnow() - timedelta(days=3))
+        con.execute("INSERT INTO decisions(ts,ticker,rule,trigger_type,trigger_id,direction,action) VALUES (?,?,?,?,?,?,?)",
+                    (ts, "TSLA", "v2_news_momentum", "volume_spike", 1, "short", "trade"))
+        con.commit()
+        rets = {"TSLA": -0.010, "SPY": 0.002, "QQQ": 0.004}
+        with mock.patch.object(evaluate, "window_ret", lambda sym, a, b, iv: (100, 100 * (1 + rets[sym]), rets[sym])):
+            n = evaluate.evaluate_decisions(con, db.utcnow(), {"slippage_bps": 3, "random_entries_per_decision": 3})
+        self.assertGreaterEqual(n, 2)
+        r = con.execute("SELECT * FROM decision_returns WHERE horizon='1h'").fetchone()
+        self.assertAlmostEqual(r["net_signed"], 0.010 - 0.0006)              # short gains 1% minus 2 x 3 bps
+        self.assertAlmostEqual(r["excess_spy"], 0.012 - 0.0006)
+        self.assertAlmostEqual(r["excess_qqq"], 0.014 - 0.0006)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM random_baseline WHERE horizon='1h'").fetchone()[0], 3)
+        s = evaluate.decision_summary(con)
+        self.assertTrue(any(x["rule"] == "v2_news_momentum" and x["rnd"] is not None for x in s))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

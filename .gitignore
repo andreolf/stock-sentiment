@@ -1,0 +1,24 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Runtime data: DB, backups, raw X posts, agent score files, logs, budget ledger,
+# kill switch, collector pid/heartbeat, routine markers, feed status
+data/
+*.db
+*.db-*
+*.sqlite*
+*.bak*
+*.log
+
+# Local dashboard output (the published copy lives in docs/)
+dashboard/
+
+# Secrets / local env
+.env
+.env.*
+*.pem
+*.key
+secrets*

@@ -1,0 +1,478 @@
+{
+ "watchlist_core": [
+  "TSLA",
+  "NVDA",
+  "PLTR"
+ ],
+ "watchlist_extra": [
+  "AMD",
+  "MSTR",
+  "HOOD",
+  "COIN",
+  "META",
+  "SMCI"
+ ],
+ "use_extra": true,
+ "volume_alerts": {
+  "baseline_sessions": 10,
+  "min_baseline_n": 5,
+  "ratio_threshold": 3.0,
+  "min_move_pct": {
+   "5Min": 0.3,
+   "15Min": 0.5,
+   "1Hour": 0.8
+  }
+ },
+ "paper_trader": {
+  "trading_enabled": true,
+  "max_trade_pct": 0.05,
+  "max_total_pct": 0.2,
+  "limit_offset_bps": 5,
+  "max_spread_pct": 0.5,
+  "hold_minutes": 60,
+  "stop_loss_pct": 2.0,
+  "signal_max_age_min": 45,
+  "spike_window_min": 60,
+  "entry_timeout_min": 10,
+  "allow_short": true,
+  "flat_before_close_min": 15,
+  "risk_per_trade_pct": 0.5,
+  "atr_mult_stop": 1.5,
+  "tp_mult": 2.0,
+  "min_stop_pct": 0.4,
+  "max_stop_pct": 4.0,
+  "news_window_min": 60,
+  "news_novelty_min": 0.5,
+  "news_min_tier": 2,
+  "attention_fade_hypothetical": true,
+  "earnings_hold_until_et": "15:45",
+  "earnings_entry_after_et": "10:00",
+  "earnings_universe": "watchlist",
+  "bracket": true
+ },
+ "reddit": {
+  "subreddits": [
+   "wallstreetbets",
+   "stocks",
+   "teslainvestorsclub"
+  ],
+  "listings": [
+   "new",
+   "hot"
+  ],
+  "user_agent": "linux:stock-sentiment-research:0.1 (personal research, contact via github.com/andreolf)",
+  "aliases": {
+   "TSLA": [
+    "tesla"
+   ],
+   "NVDA": [
+    "nvidia"
+   ],
+   "PLTR": [
+    "palantir"
+   ],
+   "AMD": [],
+   "MSTR": [
+    "microstrategy"
+   ],
+   "HOOD": [
+    "robinhood"
+   ],
+   "COIN": [
+    "coinbase"
+   ],
+   "META": [],
+   "SMCI": [
+    "supermicro"
+   ]
+  }
+ },
+ "media": {
+  "names": {
+   "TSLA": "Tesla",
+   "NVDA": "Nvidia",
+   "PLTR": "Palantir",
+   "AMD": "AMD",
+   "MSTR": "MicroStrategy",
+   "HOOD": "Robinhood",
+   "COIN": "Coinbase",
+   "META": "Meta Platforms",
+   "SMCI": "Super Micro"
+  },
+  "match": {
+   "TSLA": [
+    "Tesla",
+    "TSLA"
+   ],
+   "NVDA": [
+    "Nvidia",
+    "NVDA",
+    "Jensen Huang"
+   ],
+   "PLTR": [
+    "Palantir",
+    "PLTR",
+    "Karp"
+   ],
+   "AMD": [
+    "AMD",
+    "Advanced Micro",
+    "Lisa Su"
+   ],
+   "MSTR": [
+    "MicroStrategy",
+    "Strategy Inc",
+    "MSTR",
+    "Saylor"
+   ],
+   "HOOD": [
+    "Robinhood",
+    "HOOD"
+   ],
+   "COIN": [
+    "Coinbase",
+    "COIN"
+   ],
+   "META": [
+    "Meta Platforms",
+    "Zuckerberg",
+    "Facebook parent",
+    "META"
+   ],
+   "SMCI": [
+    "Super Micro",
+    "Supermicro",
+    "SMCI"
+   ]
+  },
+  "tier1": [
+   "Reuters",
+   "Bloomberg",
+   "The Wall Street Journal",
+   "WSJ",
+   "Financial Times",
+   "FT",
+   "CNBC"
+  ],
+  "general_feeds": [
+   {
+    "name": "reuters_gn",
+    "outlet": "Reuters",
+    "url": "https://news.google.com/rss/search?q=site:reuters.com+(business+OR+markets+OR+stocks)+when:1d&hl=en-US&gl=US&ceid=US:en"
+   },
+   {
+    "name": "bloomberg_gn",
+    "outlet": "Bloomberg",
+    "url": "https://news.google.com/rss/search?q=site:bloomberg.com+when:1d&hl=en-US&gl=US&ceid=US:en"
+   },
+   {
+    "name": "bloomberg_markets",
+    "outlet": "Bloomberg",
+    "url": "https://feeds.bloomberg.com/markets/news.rss"
+   },
+   {
+    "name": "cnbc_markets",
+    "outlet": "CNBC",
+    "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258"
+   },
+   {
+    "name": "cnbc_top",
+    "outlet": "CNBC",
+    "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"
+   },
+   {
+    "name": "cnbc_tech",
+    "outlet": "CNBC",
+    "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=19854910"
+   },
+   {
+    "name": "wsj_markets",
+    "outlet": "WSJ",
+    "url": "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain"
+   },
+   {
+    "name": "wsj_tech",
+    "outlet": "WSJ",
+    "url": "https://feeds.content.dowjones.io/public/rss/RSSWSJD"
+   },
+   {
+    "name": "ft_markets",
+    "outlet": "Financial Times",
+    "url": "https://www.ft.com/markets?format=rss"
+   },
+   {
+    "name": "ft_companies",
+    "outlet": "Financial Times",
+    "url": "https://www.ft.com/companies?format=rss"
+   },
+   {
+    "name": "marketwatch_top",
+    "outlet": "MarketWatch",
+    "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories"
+   },
+   {
+    "name": "marketwatch_pulse",
+    "outlet": "MarketWatch",
+    "url": "https://feeds.content.dowjones.io/public/rss/mw_marketpulse"
+   },
+   {
+    "name": "barrons_gn",
+    "outlet": "Barron's",
+    "url": "https://news.google.com/rss/search?q=site:barrons.com+when:1d&hl=en-US&gl=US&ceid=US:en"
+   }
+  ],
+  "ticker_feeds": [
+   {
+    "name": "yahoo_{T}",
+    "outlet": "Yahoo Finance",
+    "url": "https://feeds.finance.yahoo.com/rss/2.0/headline?s={T}&region=US&lang=en-US"
+   },
+   {
+    "name": "sa_{T}",
+    "outlet": "Seeking Alpha",
+    "url": "https://seekingalpha.com/api/sa/combined/{T}.xml"
+   },
+   {
+    "name": "gn_{T}",
+    "outlet": "(per item)",
+    "url": "https://news.google.com/rss/search?q={N}+stock+when:2d&hl=en-US&gl=US&ceid=US:en"
+   },
+   {
+    "name": "gn_tier1_{T}",
+    "outlet": "(per item)",
+    "url": "https://news.google.com/rss/search?q={N}+(site:reuters.com+OR+site:bloomberg.com+OR+site:wsj.com+OR+site:ft.com+OR+site:cnbc.com)+when:3d&hl=en-US&gl=US&ceid=US:en"
+   }
+  ],
+  "extra_feeds": {
+   "TSLA": [
+    {
+     "name": "electrek_tesla",
+     "outlet": "Electrek",
+     "url": "https://electrek.co/guides/tesla/feed/"
+    },
+    {
+     "name": "teslarati",
+     "outlet": "Teslarati",
+     "url": "https://www.teslarati.com/feed/"
+    }
+   ]
+  },
+  "dead_feeds_2026_10_21": [
+   "reutersagency.com business feed (404)",
+   "finance.yahoo.com/news/rssindex (404)",
+   "barrons.com/xml/rss (403)"
+  ],
+  "max_age_hours": 72
+ },
+ "sec": {
+  "user_agent": "Francesco Andreoli andreolf@users.noreply.github.com",
+  "_note": "SEC requires 'Name email' in the User-Agent; replace with a real contact email. 2026-10-21: sec.gov returns 403 'Undeclared Automated Tool' to this box's IP regardless of UA.",
+  "lookback_days": 14,
+  "forms": [
+   "8-K",
+   "8-K/A",
+   "4"
+  ]
+ },
+ "evaluation": {
+  "slippage_bps": 3,
+  "random_entries_per_decision": 5,
+  "random_seed": 42
+ },
+ "swiss_observe": {
+  "_note": "OBSERVE-ONLY Swiss-linked US listings (approved by Francesco 2026-10-21): log signals only, NEVER place orders. paper_trader.py and alpaca_client.py refuse every symbol listed here while observe_only=true.",
+  "enabled": true,
+  "observe_only": true,
+  "names": {
+   "NVS": {
+    "six": "NOVN.SW",
+    "name": "Novartis",
+    "aliases": [
+     "Novartis",
+     "NVS",
+     "NOVN"
+    ],
+    "adr_ratio": 1.0,
+    "observe_only": true
+   },
+   "UBS": {
+    "six": "UBSG.SW",
+    "name": "UBS",
+    "aliases": [
+     "UBS",
+     "UBSG"
+    ],
+    "adr_ratio": 1.0,
+    "observe_only": true,
+    "self_patterns": [
+     "\\bUBS[- ]?(Group)?[- ]?(Aktie|Aktien|Titel|Chef|CEO|Konzern|Gewinn|Quartal|Zahlen|Ergebnis|Kapital|Verwaltungsrat|Präsident|shares|stock|profit|earnings|quarter|capital)",
+     "UBS Group AG \\(UBS\\)",
+     "\\bGrossbank UBS\\b",
+     "\\bUBS (meldet|steigert|verdient|erzielt|übertrifft|zahlt|kauft|streicht|baut|plant|muss|wehrt|warnt|reports|beats|misses|posts|cuts jobs|buys back)\\b",
+     "\\b(Ermotti|Kelleher)\\b"
+    ],
+    "exclude_patterns": [
+     "\\bUBS\\b[^.]{0,60}\\b(hebt|senkt|stuft|bestätigt|setzt|sieht|sehen|erwartet|rechnet|bewertet|gibt|nennt|startet|empfiehlt|rät|raises|cuts|upgrades|downgrades|initiates|reiterates|says|sees)\\b",
+     "\\b(von|laut|durch|bei) (der )?UBS\\b",
+     "^UBS:\\s",
+     "-Aktie: UBS",
+     "\\s-\\s?UBS$",
+     "\\bUBS (ETF|\\(Lux\\)|\\(Irl\\)|ETC)",
+     "\\bUBS (analyst|strategist|economist|Analyst|Strategin|Stratege|Ökonom)",
+     "[,;]\\s*(so|sagt|meint|laut) UBS\\b",
+     "\\bsetzt UBS\\b",
+     "\\bUBS (AG )?(hält|belässt|beurteilt|DailyTrader|AG London|AG:|UK\\b)",
+     "\\bUBS AG\\b.{0,25}\\b(Sell|Buy|Neutral|Hold|Kaufen|Verkaufen|Halten)\\b",
+     "\\bNach UBS und\\b",
+     "\\bUBS Global\\b",
+     "\\bUBS-Fond",
+     "\\bUBS (Investment Bank|Securities|Asset Management|Evidence Lab)\\b"
+    ]
+   },
+   "LOGI": {
+    "six": "LOGN.SW",
+    "name": "Logitech",
+    "aliases": [
+     "Logitech",
+     "LOGI",
+     "LOGN"
+    ],
+    "adr_ratio": 1.0,
+    "observe_only": true,
+    "exclude_patterns": [
+     "\\bvs\\.?\\s",
+     "(Cashback|im Test|Test:|Note [0-9]|Gutschein|Rabatt|Black Friday|\\bDeal\\b)"
+    ]
+   },
+   "ONON": {
+    "six": null,
+    "name": "On Holding",
+    "aliases": [
+     "On Holding",
+     "On Running",
+     "ONON"
+    ],
+    "adr_ratio": 1.0,
+    "observe_only": true,
+    "_note": "US primary listing (NYSE), no SIX line: SIX-move step skipped"
+   },
+   "ALC": {
+    "six": "ALC.SW",
+    "name": "Alcon",
+    "aliases": [
+     "Alcon",
+     "ALC"
+    ],
+    "adr_ratio": 1.0,
+    "observe_only": true
+   }
+  },
+  "fx_symbol": "CHFUSD=X",
+  "six_delay_note": "yfinance .SW quotes are ~15-20 min delayed (unofficial)",
+  "six_hours_zurich": [
+   "09:00",
+   "17:30"
+  ],
+  "adhoc_rule": "SIX ad hoc news for primary listings: before 07:30 or after 17:40 Zurich (outside critical trading hours)",
+  "feeds": [
+   {
+    "name": "ser_mgmt",
+    "outlet": "SIX Exchange Regulation",
+    "kind": "ser_mgmt",
+    "tier": 1,
+    "url": "https://www.ser-ag.com/itf-data/management-transactions/rss-en.xml"
+   },
+   {
+    "name": "ser_sig",
+    "outlet": "SIX Exchange Regulation",
+    "kind": "ser_sig",
+    "tier": 1,
+    "url": "https://www.ser-ag.com/itf-data/significant-shareholders/rss-en.xml"
+   },
+   {
+    "name": "cash_ch",
+    "outlet": "cash.ch (AWP)",
+    "kind": "news",
+    "tier": 2,
+    "url": "https://www.cash.ch/feeds/latest/news"
+   },
+   {
+    "name": "finews_ch",
+    "outlet": "finews.ch",
+    "kind": "news",
+    "tier": 2,
+    "url": "https://www.finews.ch/news?format=feed&type=rss"
+   },
+   {
+    "name": "finews_com",
+    "outlet": "finews.com",
+    "kind": "news",
+    "tier": 2,
+    "url": "https://www.finews.com/news/english-news?format=feed&type=rss"
+   },
+   {
+    "name": "nzz_wirtschaft",
+    "outlet": "NZZ",
+    "kind": "news",
+    "tier": 2,
+    "url": "https://www.nzz.ch/wirtschaft.rss"
+   },
+   {
+    "name": "nzz_finanzen",
+    "outlet": "NZZ",
+    "kind": "news",
+    "tier": 2,
+    "url": "https://www.nzz.ch/finanzen.rss"
+   }
+  ],
+  "per_name_feeds": [
+   {
+    "name": "gn_ch_{T}",
+    "outlet": "(per item)",
+    "kind": "news",
+    "tier": 2,
+    "url": "https://news.google.com/rss/search?q={Q}+when:2d&hl=de-CH&gl=CH&ceid=CH:de"
+   }
+  ],
+  "max_age_hours": 72,
+  "six_move_threshold_pct": 1.0,
+  "preopen_window_et": [
+   "08:45",
+   "09:30"
+  ],
+  "news_window_min": 60,
+  "news_novelty_min": 0.5,
+  "news_min_abs_sentiment": 0.2,
+  "news_debounce_min": 60,
+  "composite_threshold": 2.0,
+  "evaluation": {
+   "horizons": [
+    "30m",
+    "1d",
+    "3d"
+   ],
+   "slippage_bps": 3,
+   "random_entries_per_obs": 5,
+   "random_seed": 7,
+   "min_events": 100
+  },
+  "x_enabled": false,
+  "x_max_calls_per_run": 2,
+  "_x_note": "Off by default: X chatter on Swiss names is thin and polluted. If enabled, every call must pass budget.py check/record (shared 150/day ledger) and use only the built-in x MCP tools.",
+  "_ubs_note": "UBS headlines are mostly 'UBS (the broker) rates <other stock>': kept only if a self_pattern matches, dropped if an exclude_pattern matches",
+  "exclude_title_patterns": [
+   "So viel (Gewinn|Verlust) hätte",
+   "Aktie News: .{0,40}\\b(am|im|zum|gibt|steigt|fällt|legt|verliert|mit)\\b",
+   "Aktienkurs, Nachrichten, Kurs und Verlauf",
+   "vorbörslich bei [0-9]",
+   "kostet [0-9.,]+ (Euro|CHF|USD)",
+   "^Börsen-Ticker:",
+   "\\bETF\\s*-\\s",
+   "^(DAX|SMI|SPI|Euro Stoxx)[^:]{0,20}:",
+   "Aktien (Schweiz|Europa) (Eröffnung|Schluss|Vorbörse|Ausblick)",
+   "\\b(Turbo|MiniFuture|Mini Future|open end|Knock-?out|Optionsschein|Barrier Note|Autocallable|UCITS|ETF|ETC)\\b",
+   "\\((Dist|Acc)\\)",
+   "Kurs, Chart, Analysen"
+  ]
+ }
+}
