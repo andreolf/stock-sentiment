@@ -96,10 +96,11 @@ def swiss_matchers(names):
 BROKER_STRONG = r"stuft|stufte|belässt|beließ|upgrades|downgrades|rates"
 BROKER_WEAK = (r"hebt|senkt|erhöht|reduziert|warnt|sieht|sehen|erwartet|bestätigt|empfiehlt|rät|traut|setzt|hält|"
                r"bewertet|streicht|startet|nimmt|raises|lifts|cuts|lowers|trims|boosts|sees|warns|expects|says|likes|"
-               r"prefers|backs|turns|flags|initiates|reiterates|maintains|resumes|assumes|starts")
+               r"prefers|backs|turns|flags|initiates|reiterates|maintains|resumes|assumes|starts|"
+               r"bekräftigt|bekräftigte|bestätigte|empfahl|reaffirms|reaffirmed|reiterated|maintained|initiated|keeps|kept")
 RATING_MARK = (r"\b(?:Kursziel\w*|Rating|Einstufung|Empfehlung|Kaufempfehlung|Verkaufsempfehlung|Anlageurteil|Votum|Coverage|"
-               r"Abdeckung|price target|target price|PT|rating|coverage|"
-               r"(?:auf|to) ['\"]?(?:Buy|Sell|Neutral|Hold|Kaufen|Verkaufen|Halten|Overweight|Underweight|Outperform|"
+               r"Abdeckung|zum (?:Kauf|Verkauf)|price target|target price|PT|rating|coverage|"
+               r"(?:auf|to|at|with) ['\"]?(?:Buy|Sell|Neutral|Hold|Kaufen|Verkaufen|Halten|Overweight|Underweight|Outperform|"
                r"Underperform|Equal[- ]?weight))\b")
 # '<Other>-Aktie' / '<Other> Aktie' / '<Other> shares|stock' (capitalised name right before the stock word)
 OTHER_STOCK = re.compile(r"(?<![\w-])([A-ZÄÖÜ][\w&.'’]*(?:[ -][A-ZÄÖÜ][\w&.'’]*){0,2})(?:-Aktien?\b| Aktie\b| shares\b| stock\b)")
@@ -157,6 +158,11 @@ def other_subject(t, title, names):
         e = EN_ON_OTHER.search(rest)
         if e and not A.search(e.group(1)):
             return True
+    # 2b) '<name> ... für (die) <Other>-Aktie' / '<name> ... for <Other> stock|shares' with this name acting first
+    f = re.search(rf"(?:^|[:;,–—|-]\s*)(?:die |the )?(?:{pat})\b.*?\b(?:für (?:die |den )?([A-ZÄÖÜ][\w&.'’-]*)-?\s?Aktie|"
+                  rf"for ([A-Z][\w&.'’-]*) (?:stock|shares))\b", title)
+    if f and not A.search(f.group(1) or f.group(2)):
+        return True
     # 3) another stock moves on this name's rating / note ('Nike shares slip after UBS downgrade')
     if others and re.search(rf"(?:{pat})[- ](?i:downgrade|upgrade|Abstufung|Hochstufung|Herabstufung|rating|note|call|"
                             rf"Studie|Analyst\w*|says|sagt|meint)\b", title):

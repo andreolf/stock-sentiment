@@ -232,6 +232,29 @@ class Headlines(unittest.TestCase):
                      ("ALC", "Alcon bleibt auf 'Buy' - Berenberg verweist auf Dynamik bei Produkteinführungen")]:
             self.assertFalse(swiss_news.other_subject(t, h, n), f"{t}: {h}")
 
+    def test_broker_reiteration_verbs_rejected(self):
+        # 2026-10-21 miss: 'UBS bekräftigt Kaufempfehlung für Equifax-Aktie' created a UBS observation
+        n = SO["names"]
+        for h in ["UBS bekräftigt Kaufempfehlung für Equifax-Aktie nach Zahlen",
+                  "UBS bestätigt Kaufempfehlung für Equifax",
+                  "UBS empfiehlt Equifax zum Kauf",
+                  "UBS nimmt Abdeckung von Equifax mit Buy auf",
+                  "UBS startet Abdeckung für Equifax mit Neutral",
+                  "UBS bleibt bei Kaufempfehlung für Equifax",
+                  "UBS reiterates Buy on Equifax",
+                  "UBS reaffirms Equifax rating",
+                  "UBS maintains Neutral on Equifax",
+                  "UBS initiates Equifax at Buy",
+                  "UBS keeps Buy rating on Equifax",
+                  "UBS sieht Chancen für Equifax-Aktie",
+                  "UBS positive for Equifax stock"]:
+            self.assertTrue(swiss_news.other_subject("UBS", h, n), h)
+            self.assertFalse(swiss_news.relevant("UBS", h, SO, n), h)
+        for t, h in [("UBS", "UBS bekräftigt Jahresziele"), ("UBS", "UBS bestätigt Stellenabbau in der Schweiz"),
+                     ("NVS", "UBS bekräftigt Kaufempfehlung für Novartis-Aktie"),
+                     ("UBS", "UBS keeps dividend unchanged")]:
+            self.assertFalse(swiss_news.other_subject(t, h, n), f"{t}: {h}")
+
     def test_subject_check_generic_for_other_names(self):
         n = SO["names"]
         self.assertFalse(swiss_news.relevant("NVS", "Roche-Aktie fester: Novartis-Chef sieht Chancen im Markt", SO, n))

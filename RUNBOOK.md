@@ -298,3 +298,4 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
 - `tests/test_pipeline.py` synthetic end-to-end test (temp DB; signal fires, debounce, evaluate vs SPY)
 - `data/raw/YYYY-MM-DD/` raw X results · `data/scores/` agent score files
 - 2026-10-21: swiss_news.other_subject rejects MarketScreener '<Other>(, Inc./AG/SE/plc/Corp.) : <name> <verb>' + 'bleibt bei <Empfehlung/Rating/Buy/...>' broker reiterations; rescan quarantined sw3a2fec1fbc081b05 (Heartland Express, Inc. : UBS bleibt neutral).
+- 2026-10-21: swiss_news.other_subject now catches broker reiteration/rating verbs (bekräftigt, reaffirms, keeps, initiates…) and 'für <Other>-Aktie'/'for <Other> stock'; rescan quarantined 3 UBS headlines to media_rejected.
