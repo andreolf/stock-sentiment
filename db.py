@@ -124,6 +124,10 @@ CREATE TABLE IF NOT EXISTS swiss_obs_returns (
 CREATE TABLE IF NOT EXISTS swiss_random (
   obs_id INTEGER NOT NULL, k INTEGER NOT NULL, horizon TEXT NOT NULL, ts TEXT, net_signed REAL,
   PRIMARY KEY (obs_id, k, horizon));
+-- observations NOT logged because the IEX entry quote failed the bad-quote guard (swiss.quote_guard)
+CREATE TABLE IF NOT EXISTS swiss_obs_skipped (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, ticker TEXT NOT NULL, rule TEXT, trigger_type TEXT,
+  trigger_ref TEXT, direction TEXT, reason TEXT, skip_reason TEXT, bid REAL, ask REAL, mid REAL, ref_price REAL, ref_src TEXT);
 -- headlines removed from `media` as false positives (copied here verbatim with a reason; never deleted outright)
 CREATE TABLE IF NOT EXISTS media_rejected (
   id TEXT NOT NULL, ticker TEXT NOT NULL, created_at TEXT, outlet TEXT, tier INTEGER, title TEXT, url TEXT, feed TEXT,

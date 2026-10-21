@@ -35,6 +35,10 @@ Observation rules (all hypothetical, swiss_observations.observe_only = 1):
   swiss_composite   S = mean(z media sentiment 6h [/0.15], z SIX move [six_chg/1%]); A = z IEX volume [log ratio/0.5];
                     composite.py formula (S + sign(S)*A/2)/sqrt(1.25); |c| > 2 -> sign(c). Needs headline sentiment
                     (a SIX move alone is the six_move_gap rule). Debounce 2 h.
+Bad-quote guard (US open, entry = IEX now; config swiss_observe.quote_guard): spread (ask-bid)/mid > 1% or mid more than
+  2% from the fresh last IEX trade / latest 1-min bar close (4% vs prev close when neither is fresh) -> the observation
+  is NOT logged; the skip goes to table swiss_obs_skipped + 'SWISS-OBS-SKIP' in the collector log. When the quote is
+  sane, entry = the fresh last trade (basis iex_trade_now) or 1-min bar close (iex_bar_now), else the mid (iex_mid_now).
 """
 import argparse, json, math, os, random, statistics as st, sys
 from datetime import datetime, timedelta, timezone
@@ -183,14 +187,116 @@ def iex_spikes(con, so, now):
     return new
 
 
-def iex_mid(t):
+QG_DEFAULT = {"max_spread_pct": 1.0, "max_mid_dev_pct": 2.0, "max_prev_close_dev_pct": 4.0, "max_ref_age_min": 30,
+              "prefer_last_price": True}
+
+
+def _pos(v):
     try:
-        from alpaca_client import AlpacaPaper
-        c = AlpacaPaper()
-        q = c.latest_quote(t) or {}
-        if q.get("bp") and q.get("ap") and q["ap"] >= q["bp"] > 0:
-            return round((q["bp"] + q["ap"]) / 2, 4)
-        return float((c.latest_trade(t) or {}).get("p") or 0) or None
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 and math.isfinite(v) else None
+
+
+def _age_min(ts, now):
+    try:
+        return (now - db.parse_ts(ts)).total_seconds() / 60 if ts else None
+    except Exception:
+        return None
+
+
+def quote_guard(quote, trade, bar, prev_close, now, so=None):
+    """Pure bad-quote guard for 'entry = IEX now' observations (2026-10-21: LOGI bid 93.81 / ask 109.89|124.54 while the
+    line traded ~109-110 produced observations #15-#20). Thresholds: swiss_observe.quote_guard (QG_DEFAULT).
+    Reference price = last IEX trade if fresh (<= max_ref_age_min), else latest 1-min bar close if fresh, else prev close.
+    Reject (skip, do not log) when the quote spread (ask-bid)/mid > max_spread_pct, or the mid deviates from the reference
+    by > max_mid_dev_pct (trade/bar) / max_prev_close_dev_pct (prev close fallback). Without a two-sided quote, a fresh
+    trade/bar within max_prev_close_dev_pct of prev close is used. Entry prefers the fresh trade/bar price when sane.
+    -> {"price", "basis", "skip" (reason or None), "bid", "ask", "mid", "ref", "ref_src", "spread_pct", "dev_pct"}"""
+    g = {**QG_DEFAULT, **((so or {}).get("quote_guard") or {})}
+    q, trade, bar = quote or {}, trade or {}, bar or {}
+    bid, ask = _pos(q.get("bp")), _pos(q.get("ap"))
+    ref, src = None, None
+    for d, k, name in ((trade, "p", "iex_trade"), (bar, "c", "iex_1m_bar")):
+        p, age = _pos(d.get(k)), _age_min(d.get("t"), now)
+        if p and age is not None and age <= g["max_ref_age_min"]:
+            ref, src = p, name
+            break
+    pc = _pos(prev_close)
+    out = {"price": None, "basis": None, "skip": None, "bid": bid, "ask": ask, "mid": None, "ref": ref or pc,
+           "ref_src": src or ("prev_close" if pc else None), "spread_pct": None, "dev_pct": None}
+    if bid and ask and ask >= bid:
+        mid = (bid + ask) / 2
+        out["mid"] = round(mid, 4)
+        out["spread_pct"] = sp = (ask - bid) / mid * 100
+        if sp > g["max_spread_pct"]:
+            out["skip"] = f"bad IEX quote: spread {sp:.2f}% > {g['max_spread_pct']}% (bid {bid} / ask {ask})"
+            return out
+        r, lim = (ref, g["max_mid_dev_pct"]) if ref else (pc, g["max_prev_close_dev_pct"])
+        if r:
+            out["dev_pct"] = dv = (mid / r - 1) * 100
+            if abs(dv) > lim:
+                out["skip"] = (f"bad IEX quote: mid {mid:.4g} deviates {dv:+.2f}% from {out['ref_src']} {r} (> {lim}%)")
+                return out
+        if ref and g.get("prefer_last_price", True):
+            out["price"], out["basis"] = round(ref, 4), ("iex_trade_now" if src == "iex_trade" else "iex_bar_now")
+        else:
+            out["price"], out["basis"] = round(mid, 4), "iex_mid_now"
+        return out
+    if bid or ask:
+        out["skip"] = f"bad IEX quote: one-sided/crossed (bid {bid} / ask {ask})"
+        return out
+    # no quote at all: fall back to a fresh trade/bar if it is sane vs prev close
+    if ref:
+        if pc and abs(ref / pc - 1) * 100 > g["max_prev_close_dev_pct"]:
+            out["dev_pct"] = (ref / pc - 1) * 100
+            out["skip"] = f"no IEX quote and {src} {ref} deviates {out['dev_pct']:+.2f}% from prev close {pc} (> {g['max_prev_close_dev_pct']}%)"
+            return out
+        out["price"], out["basis"] = round(ref, 4), ("iex_trade_now" if src == "iex_trade" else "iex_bar_now")
+        return out
+    out["basis"] = "iex_mid_now"   # no IEX data at all: logged without a price; evaluate fills the entry from yfinance
+    return out
+
+
+def iex_entry(t, so=None, now=None, client=None):
+    """Fetch IEX quote, last trade, latest 1-min bar and previous daily close for t, then apply quote_guard()."""
+    now = now or db.utcnow()
+    q = tr = bar = pc = None
+    try:
+        if client is None:
+            from alpaca_client import AlpacaPaper
+            client = AlpacaPaper()
+    except Exception:
+        return quote_guard(None, None, None, None, now, so)
+    for name, fn in (("q", lambda: client.latest_quote(t)), ("tr", lambda: client.latest_trade(t))):
+        try:
+            v = fn()
+        except Exception:
+            v = None
+        if name == "q":
+            q = v
+        else:
+            tr = v
+    try:
+        b = (client.bars([t], "1Min", start=now - timedelta(minutes=60)) or {}).get(t) or []
+        bar = b[-1] if b else None
+    except Exception:
+        bar = None
+    try:
+        d = (client.bars([t], "1Day", start=now - timedelta(days=10)) or {}).get(t) or []
+        today = now.astimezone(ET).date()
+        prev = [x for x in d if db.parse_ts(x["t"]).astimezone(ET).date() < today]
+        pc = prev[-1]["c"] if prev else None
+    except Exception:
+        pc = None
+    return quote_guard(q, tr, bar, pc, now, so)
+
+
+def iex_mid(t, so=None):
+    """Guarded IEX entry for t (dict from quote_guard). Kept under the old name: log_obs(price_fn=iex_mid)."""
+    try:
+        return iex_entry(t, so if so is not None else cfg())
     except Exception:
         return None
 
@@ -202,6 +308,17 @@ def log_obs(con, now, t, so, rule, ttype, ref, direction, reason, news_ref=None,
         return None
     if us_regular_open(now):
         basis, ets, px = "iex_mid_now", db.iso(now), price_fn(t)
+        if isinstance(px, dict):   # guarded entry (quote_guard): skip, do not log, on a bad quote
+            g = px
+            if g.get("skip"):
+                con.execute("""INSERT INTO swiss_obs_skipped(ts, ticker, rule, trigger_type, trigger_ref, direction, reason, skip_reason,
+                               bid, ask, mid, ref_price, ref_src) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (db.iso(now), t, rule, ttype, str(ref), direction, reason, g["skip"], g.get("bid"), g.get("ask"),
+                             g.get("mid"), g.get("ref"), g.get("ref_src")))
+                con.commit()
+                print(f"SWISS-OBS-SKIP (observe-only) {rule} {t} {direction}: {g['skip']} | {reason[:80]}")
+                return None
+            basis, px = g.get("basis") or "iex_mid_now", g.get("price")
     else:
         basis, ets, px = "next_us_open", None, None
     six = so.get("names", {}).get(t, {}).get("six")

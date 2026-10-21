@@ -441,6 +441,153 @@ class Evaluation(unittest.TestCase):
         self.assertAlmostEqual(r["open_to_close_pct"], (102 / 101 - 1) * 100)
 
 
+class BrokerAndHoldingsHeadlines(unittest.TestCase):
+    """2026-10-22: 'Aktien von Casella Waste Systems fallen nach UBS-Herabstufung' (obs #20) and 'UBS Group AG Reduces
+    Stake in Gamma Communications PLC Below 5% Threshold' (obs #14) created UBS observations."""
+    def test_broker_behind_rating_action_rejected(self):
+        n = SO["names"]
+        for t, h in [("UBS", "Aktien von Casella Waste Systems fallen nach UBS-Herabstufung"),
+                     ("UBS", "Aktien von Casella Waste fallen nach UBS-Herabstufung"),
+                     ("UBS", "Aktien von Casella steigen nach UBS-Hochstufung"),
+                     ("UBS", "Casella Waste legt nach UBS-Abstufung zu"),
+                     ("UBS", "Casella fällt nach UBS-Kurszielsenkung"),
+                     ("UBS", "Casella-Aktie fällt nach UBS-Downgrade"),
+                     ("UBS", "Casella Waste-Aktie fällt nach UBS-Downgrade"),
+                     ("UBS", "Casella fällt nach Herabstufung durch UBS"),
+                     ("UBS", "UBS-Herabstufung belastet Casella Waste"),
+                     ("UBS", "Casella Waste falls after UBS's downgrade"),
+                     ("NVS", "Roche fällt nach Novartis-Herabstufung")]:
+            self.assertTrue(swiss_news.other_subject(t, h, n), f"{t}: {h}")
+            self.assertFalse(swiss_news.relevant(t, h, SO, n), f"{t}: {h}")
+
+    def test_holdings_disclosures_rejected(self):
+        n = SO["names"]
+        for h in ["UBS Group AG Reduces Stake in Gamma Communications PLC Below 5% Threshold",
+                  "UBS Group AG increases stake in Gamma Communications",
+                  "UBS Group AG Increases Stake in Gamma Communications PLC Above 5% Threshold",
+                  "UBS Group AG Discloses Major Shareholder Position in LANXESS AG",
+                  "UBS holding in Gamma Communications falls below 5%",
+                  "UBS AG discloses 5.1% holding in Gamma Communications",
+                  "UBS erhöht Anteil an Gamma Communications",
+                  "Gamma Communications: UBS Group AG crosses 5% threshold"]:
+            self.assertTrue(swiss_news.other_subject("UBS", h, n), h)
+            self.assertFalse(swiss_news.relevant("UBS", h, SO, n), h)
+
+    def test_real_self_news_still_passes(self):
+        n = SO["names"]
+        for t, h in [("UBS", "Lex UBS: Warum ein Wegzug kaum helfen würde"),
+                     ("ALC", "Alcon bleibt auf 'Buy' - Berenberg verweist auf Dynamik bei Produkteinführungen"),
+                     ("UBS", "UBS fällt nach JPMorgan-Herabstufung"),               # UBS is the rated stock
+                     ("UBS", "UBS-Aktie fällt nach Herabstufung durch JPMorgan"),
+                     ("UBS", "UBS shares fall after Morgan Stanley downgrade"),
+                     ("NVS", "Novartis-Aktie fällt nach UBS-Herabstufung"),          # Novartis is the subject
+                     ("NVS", "Aktien von Novartis fallen nach UBS-Herabstufung"),
+                     ("ONON", "On Holding fällt nach UBS-Herabstufung"),
+                     ("ONON", "On Holding shares jump after strong quarter"),
+                     ("UBS", "UBS sells stake in Credit Suisse unit"),             # own corporate deal
+                     ("UBS", "UBS verkauft Beteiligung an Swisscard"),
+                     ("UBS", "Grossaktionär erhöht Anteil an der UBS"),
+                     ("UBS", "UBS erhöht Kapitalpuffer")]:
+            self.assertFalse(swiss_news.other_subject(t, h, n), f"{t}: {h}")
+            self.assertTrue(swiss_news.relevant(t, h, SO, n), f"{t}: {h}")
+
+
+class QuoteGuard(unittest.TestCase):
+    """2026-10-21: LOGI obs #15-#20 logged from a broken IEX quote (bid 93.81 / ask 109.89|124.54, line ~109-110)."""
+    NOW = datetime(2026, 10, 21, 18, 0, tzinfo=timezone.utc)      # 14:00 ET, US open
+
+    def fresh(self, mins=1):
+        return db.iso(self.NOW - timedelta(minutes=mins))
+
+    def test_config_thresholds(self):
+        g = SO["quote_guard"]
+        self.assertEqual((g["max_spread_pct"], g["max_mid_dev_pct"], g["max_prev_close_dev_pct"]), (1.0, 2.0, 4.0))
+
+    def test_logi_wide_spread_rejected(self):
+        for ask in (109.89, 124.54):
+            g = swiss.quote_guard({"bp": 93.81, "ap": ask}, {"p": 109.6, "t": self.fresh()}, None, 109.28, self.NOW, SO)
+            self.assertIsNotNone(g["skip"]); self.assertIn("spread", g["skip"]); self.assertIsNone(g["price"])
+
+    def test_mid_far_from_last_trade_rejected(self):
+        # tight but displaced quote (mid 117.19 vs trades ~109.6)
+        g = swiss.quote_guard({"bp": 117.15, "ap": 117.22}, {"p": 109.6, "t": self.fresh()}, None, 109.28, self.NOW, SO)
+        self.assertIn("deviates", g["skip"]); self.assertEqual(g["ref_src"], "iex_trade")
+        # stale trade -> 1-min bar close is the reference
+        g = swiss.quote_guard({"bp": 117.15, "ap": 117.22}, {"p": 117.2, "t": self.fresh(90)}, {"c": 109.7, "t": self.fresh(2)},
+                              109.28, self.NOW, SO)
+        self.assertIn("deviates", g["skip"]); self.assertEqual(g["ref_src"], "iex_1m_bar")
+        # nothing fresh -> prev close fallback (4%)
+        g = swiss.quote_guard({"bp": 117.15, "ap": 117.22}, None, None, 109.28, self.NOW, SO)
+        self.assertIn("prev_close", g["skip"])
+        g = swiss.quote_guard({"bp": 111.0, "ap": 111.05}, None, None, 109.28, self.NOW, SO)
+        self.assertIsNone(g["skip"]); self.assertEqual(g["basis"], "iex_mid_now")
+
+    def test_sane_quote_prefers_last_trade(self):
+        g = swiss.quote_guard({"bp": 109.55, "ap": 109.65}, {"p": 109.62, "t": self.fresh()}, {"c": 109.5, "t": self.fresh()},
+                              109.28, self.NOW, SO)
+        self.assertIsNone(g["skip"]); self.assertEqual((g["price"], g["basis"]), (109.62, "iex_trade_now"))
+        g = swiss.quote_guard({"bp": 109.55, "ap": 109.65}, None, {"c": 109.5, "t": self.fresh()}, 109.28, self.NOW, SO)
+        self.assertEqual((g["price"], g["basis"]), (109.5, "iex_bar_now"))
+        off = {**SO, "quote_guard": {**SO["quote_guard"], "prefer_last_price": False}}
+        g = swiss.quote_guard({"bp": 109.55, "ap": 109.65}, {"p": 109.62, "t": self.fresh()}, None, 109.28, self.NOW, off)
+        self.assertEqual((g["price"], g["basis"]), (109.6, "iex_mid_now"))
+
+    def test_thresholds_configurable(self):
+        loose = {**SO, "quote_guard": {"max_spread_pct": 20.0, "max_mid_dev_pct": 10.0}}
+        g = swiss.quote_guard({"bp": 93.81, "ap": 109.89}, {"p": 101.0, "t": self.fresh()}, None, 109.28, self.NOW, loose)
+        self.assertIsNone(g["skip"])
+
+    def test_no_quote_cases(self):
+        g = swiss.quote_guard({}, {"p": 109.6, "t": self.fresh()}, None, 109.28, self.NOW, SO)
+        self.assertEqual((g["skip"], g["price"]), (None, 109.6))
+        g = swiss.quote_guard({}, {"p": 125.0, "t": self.fresh()}, None, 109.28, self.NOW, SO)
+        self.assertIsNotNone(g["skip"])
+        g = swiss.quote_guard({"bp": 0, "ap": 109.9}, None, None, 109.28, self.NOW, SO)
+        self.assertIn("one-sided", g["skip"])
+        g = swiss.quote_guard(None, None, None, None, self.NOW, SO)          # no IEX data at all: logged without a price
+        self.assertEqual((g["skip"], g["price"]), (None, None))
+
+    def test_iex_entry_with_fake_client(self):
+        now = self.NOW
+        class C:
+            def latest_quote(s, t): return {"bp": 93.81, "ap": 109.89}
+            def latest_trade(s, t): return {"p": 109.6, "t": db.iso(now - timedelta(minutes=1))}
+            def bars(s, sym, tf, start=None, **kw):
+                if tf == "1Min":
+                    return {sym[0]: [{"c": 109.5, "t": db.iso(now - timedelta(minutes=2))}]}
+                return {sym[0]: [{"c": 108.0, "t": "2026-10-20T04:00:00Z"}, {"c": 109.28, "t": "2026-10-20T04:00:00Z"},
+                                 {"c": 109.9, "t": "2026-10-21T04:00:00Z"}]}
+        g = swiss.iex_entry("LOGI", SO, now, client=C())
+        self.assertIn("spread", g["skip"]); self.assertEqual(g["ref"], 109.6)
+
+    def test_log_obs_skips_bad_quote_and_logs_reason(self):
+        con = fresh_con()
+        bad = lambda t: swiss.quote_guard({"bp": 93.81, "ap": 124.54}, {"p": 109.6, "t": self.fresh()}, None, 109.28, self.NOW, SO)
+        good = lambda t: swiss.quote_guard({"bp": 109.55, "ap": 109.65}, {"p": 109.62, "t": self.fresh()}, None, 109.28, self.NOW, SO)
+        r = swiss.log_obs(con, self.NOW, "LOGI", SO, "swiss_composite", "composite", "LOGI:x", "long", "composite +5.61", price_fn=bad)
+        self.assertIsNone(r)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM swiss_observations").fetchone()[0], 0)
+        sk = con.execute("SELECT * FROM swiss_obs_skipped").fetchone()
+        self.assertEqual((sk["ticker"], sk["rule"], sk["bid"], sk["ask"]), ("LOGI", "swiss_composite", 93.81, 124.54))
+        self.assertIn("spread", sk["skip_reason"])
+        r = swiss.log_obs(con, self.NOW, "LOGI", SO, "swiss_composite", "composite", "LOGI:x", "long", "composite +5.61", price_fn=good)
+        o = con.execute("SELECT * FROM swiss_observations WHERE id=?", (r,)).fetchone()
+        self.assertEqual((o["entry_basis"], o["entry_price"], o["observe_only"]), ("iex_trade_now", 109.62, 1))
+
+    def test_observe_composite_skipped_on_bad_quote(self):
+        con = fresh_con()
+        now = self.NOW
+        con.execute("INSERT INTO media(id,ticker,created_at,outlet,tier,title,sentiment) VALUES (?,?,?,?,?,?,?)",
+                    ("mL", "LOGI", db.iso(now - timedelta(minutes=30)), "Reuters", 1, "Logitech raises outlook", 0.9))
+        con.commit()
+        row = {"ticker": "LOGI", "six_symbol": "LOGN.SW", "six_chg_pct": 1.6, "implied_gap_pct": 1.6, "us_prev_close": 109.28,
+               "six_bar_ts": db.iso(now), "delay_min": 15}
+        bad = lambda t: swiss.quote_guard({"bp": 93.81, "ap": 109.89}, None, None, 109.28, now, SO)
+        swiss.observe(con, SO, now, six_rows=[row], price_fn=bad)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM swiss_observations WHERE ticker='LOGI'").fetchone()[0], 0)
+        self.assertGreaterEqual(con.execute("SELECT COUNT(*) FROM swiss_obs_skipped WHERE ticker='LOGI'").fetchone()[0], 1)
+
+
 class XOff(unittest.TestCase):
     def test_x_check_disabled(self):
         self.assertEqual(swiss.x_check({"x_enabled": False}), 3)

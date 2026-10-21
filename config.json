@@ -444,6 +444,14 @@
   "news_novelty_min": 0.5,
   "news_min_abs_sentiment": 0.2,
   "news_debounce_min": 60,
+  "quote_guard": {
+   "_note": "bad-quote guard for entry = IEX now (2026-10-22, after LOGI obs #15-#20 from bid 93.81/ask 109.89|124.54): skip (do not log) if spread > max_spread_pct or |mid/ref-1| > max_mid_dev_pct (ref = last IEX trade or 1-min bar close no older than max_ref_age_min) or > max_prev_close_dev_pct vs prev close when no fresh trade/bar; entry = fresh trade/bar price when prefer_last_price",
+   "max_spread_pct": 1.0,
+   "max_mid_dev_pct": 2.0,
+   "max_prev_close_dev_pct": 4.0,
+   "max_ref_age_min": 30,
+   "prefer_last_price": true
+  },
   "composite_threshold": 2.0,
   "evaluation": {
    "horizons": [

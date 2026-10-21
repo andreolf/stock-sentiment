@@ -109,6 +109,15 @@ EN_ON_OTHER = re.compile(r"\b(?:on|for) (?!(?:Shareholders|Investors|Clients|Sta
 # 'bleibt bei (seiner) Kaufempfehlung/Empfehlung/Rating/Buy/Neutral/Sell' = broker reiteration ('Alcon bleibt auf Buy' is not)
 BLEIBT_BEI = re.compile(r"\bbleibt\s+bei\s+(?:\w+\s+){0,3}?['\"]?(?:Kaufempfehlung|Verkaufsempfehlung|Empfehlung|Rating|Einstufung|"
                         r"Kursziel\w*|Buy|Neutral|Sell|Hold|Overweight|Underweight|Outperform|Underperform|Kaufen|Halten|Verkaufen)\b", re.I)
+# rating actions a broker takes ON another stock ('UBS-Herabstufung', 'UBS-Kursziel', 'UBS downgrade')
+RATING_ACTION = (r"Herabstufung|Hochstufung|Heraufstufung|Abstufung|Aufstufung|Kurszielsenkung|Kurszielerhöhung|Kurszielanhebung|"
+                 r"Kursziel\w*|Kaufempfehlung|Verkaufsempfehlung|Empfehlung|Einstufung|Downgrade|Upgrade|price target|"
+                 r"target (?:cut|hike|raise)|rating (?:cut|change)|initiation")
+# holdings vocabulary (this name as shareholder of another company)
+HOLDING_WORD = r"stakes?|holdings?|shareholdings?|positions?|interests? (?=in\b)|Beteiligung(?:en)?|Anteile?|Stimmrechtsanteile?|Aktienanteile?"
+# a sale/purchase of a stake is the company's own corporate deal (kept), not a holdings disclosure
+CORP_DEAL = r"(?i:sells?|sold|selling|buys?|bought|buying|acquires?|acquired|divests?|divested|verkauft|kauft|übernimmt|veräussert)"
+THRESHOLD_WORD = r"threshold|Schwelle|Meldeschwelle|Stimmrechte|voting rights|crosses|falls below|unterschreitet|überschreitet"
 _alias_re = {}
 
 
@@ -162,6 +171,26 @@ def other_subject(t, title, names):
     f = re.search(rf"(?:^|[:;,–—|-]\s*)(?:die |the )?(?:{pat})\b.*?\b(?:für (?:die |den )?([A-ZÄÖÜ][\w&.'’-]*)-?\s?Aktie|"
                   rf"for ([A-Z][\w&.'’-]*) (?:stock|shares))\b", title)
     if f and not A.search(f.group(1) or f.group(2)):
+        return True
+    # 2c) this name is only the BROKER behind a rating action that moves another stock (German + English), e.g.
+    #     'Aktien von Casella Waste fallen nach UBS-Herabstufung', '<Other>-Aktie fällt nach UBS-Downgrade',
+    #     'Casella fällt nach Herabstufung durch UBS', 'UBS-Herabstufung belastet Casella'. Nothing before the trigger
+    #     may name this company ('UBS-Aktie fällt nach UBS-Herabstufung' stays undecided here).
+    if re.match(rf"^\s*(?:{pat})-(?i:{RATING_ACTION})\b", title):
+        return True
+    for b in (re.search(rf"\b(?i:nach|after|following|on|auf|dank|wegen|trotz)\s+(?i:einer |der |dem |a |an |the )?(?:{pat})"
+                        rf"(?:'s|’s)?[- ](?i:{RATING_ACTION})\b", title),
+              re.search(rf"\b(?i:{RATING_ACTION})\s+(?i:durch|von|der|by|from|at)\s+(?:die |der |the )?(?:{pat})\b", title)):
+        if b and not A.search(title[:b.start()]):
+            return True
+    # 2d) holdings disclosures: this name as a SHAREHOLDER of another company ('UBS Group AG Reduces Stake in Gamma
+    #     Communications PLC Below 5% Threshold', 'UBS increases stake in X', 'UBS holding in X', 'UBS erhöht Anteil an X')
+    h = re.search(rf"(?:{pat})(?:[ -](?:Group|AG|Asset Management|Fund Management|Switzerland))*(?:'s|’s)?\s+(?:(?!{CORP_DEAL}\b)\S+\s+){{0,3}}?"
+                  rf"(?i:{HOLDING_WORD})\s+(?i:in|an|at|of|bei)\s+(?:der |die |den |dem |the )?([A-ZÄÖÜ][\w&.'’-]*)", title)
+    if h and not A.search(h.group(1)) and h.group(1) not in ("Der", "Die", "The"):
+        return True
+    m = re.match(r"^([^:]{2,90}?):\s(.*)$", title)
+    if m and not A.search(m.group(1)) and re.search(rf"(?:{pat})\b.*\b(?i:{THRESHOLD_WORD})", m.group(2)):
         return True
     # 3) another stock moves on this name's rating / note ('Nike shares slip after UBS downgrade')
     if others and re.search(rf"(?:{pat})[- ](?i:downgrade|upgrade|Abstufung|Hochstufung|Herabstufung|rating|note|call|"

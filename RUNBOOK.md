@@ -294,10 +294,19 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
   signal_returns, paper_trades). Env `STOCK_SENT_DB` / `STOCK_SENT_BUDGET` override paths (tests).
 - `ingest.py` (JSON shapes in its docstring: `.venv/bin/python ingest.py -h`), `score.py`, `signals.py`, `evaluate.py`
 - `swiss.py`, `swiss_news.py` Swiss observe-only arm (tables six_moves, six_open_tests, swiss_iex, swiss_observations,
-  swiss_obs_returns, swiss_random, media_rejected; feed status `data/swiss_feed_status.json`)
+  swiss_obs_returns, swiss_random, media_rejected, swiss_obs_skipped; feed status `data/swiss_feed_status.json`)
 - `tests/test_swiss.py` config, no-trade guarantee (trader + client), SIX math, headline rules, fake feeds (blocked feed
-  skipped, dedupe, SER), observation rules, evaluation with slippage, X off
+  skipped, dedupe, SER), observation rules, evaluation with slippage, X off, bad-quote guard, broker-action/holdings headlines
 - `tests/test_pipeline.py` synthetic end-to-end test (temp DB; signal fires, debounce, evaluate vs SPY)
 - `data/raw/YYYY-MM-DD/` raw X results · `data/scores/` agent score files
 - 2026-10-21: swiss_news.other_subject rejects MarketScreener '<Other>(, Inc./AG/SE/plc/Corp.) : <name> <verb>' + 'bleibt bei <Empfehlung/Rating/Buy/...>' broker reiterations; rescan quarantined sw3a2fec1fbc081b05 (Heartland Express, Inc. : UBS bleibt neutral).
 - 2026-10-21: swiss_news.other_subject now catches broker reiteration/rating verbs (bekräftigt, reaffirms, keeps, initiates…) and 'für <Other>-Aktie'/'for <Other> stock'; rescan quarantined 3 UBS headlines to media_rejected.
+- 2026-10-22: swiss.py bad-quote guard (config swiss_observe.quote_guard): an observation with entry = IEX now is NOT logged
+  when spread (ask-bid)/mid > 1% or the mid is > 2% from the fresh (<= 30 min) last IEX trade / 1-min bar close (> 4% vs
+  prev close if neither is fresh); skips go to table swiss_obs_skipped and 'SWISS-OBS-SKIP' lines in the collector log.
+  Sane quote -> entry = last trade (entry_basis iex_trade_now) or bar close (iex_bar_now), else mid (iex_mid_now).
+  Origin: LOGI obs #15-#20 (bid 93.81 / ask 109.89|124.54 while LOGI traded ~109-110).
+- 2026-10-22: swiss_news.other_subject also rejects '<Other> fällt nach UBS-Herabstufung/-Hochstufung/-Abstufung/-Kursziel…',
+  'Herabstufung durch UBS', 'UBS-Herabstufung belastet <Other>', '<Other> falls after UBS downgrade' and holdings
+  disclosures ('UBS Group AG Reduces/Increases Stake in <Other>', 'holding in <Other>', 'erhöht Anteil an <Other>',
+  '<Other>: UBS … crosses 5% threshold'); stake sales/purchases ('UBS sells stake in …') stay as UBS news.
