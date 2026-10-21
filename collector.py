@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Free fast loop: every 5 min during US regular hours run the zero-X-cost collectors. Never trades, never calls X.
+"""Free fast loop: every 5 min during US regular hours run the zero-X-cost collectors. Never opens trades, never calls X.
+EXIT ENFORCEMENT (since 2026-10-21): every open tick first runs `paper_trader.py --live-paper --exits-only
+--flat-before-close` (reconcile + time exits + earnings-after-close flat-by-15:40 ET + flat 15 min before the close;
+no entries, no X). Between ticks the loop also wakes at the earliest pending exit_due (+3 s) and runs that step, so
+60-min time exits fire within seconds instead of waiting for the next 30-min routine.
 
 Usage: collector.py start | stop | status | ensure | run | once
   start   launch the loop in the background (nohup-style, own session), pidfile data/collector.pid
@@ -86,6 +90,35 @@ def swiss_enabled():
     return bool((db.load_config().get("swiss_observe") or {}).get("enabled"))
 
 
+EXITS = ["paper_trader.py", "--live-paper", "--exits-only", "--flat-before-close"]
+
+
+def exits_step():
+    """Paper-only exit enforcement; logged with the CLOSE/reconcile lines."""
+    t0 = time.time()
+    try:
+        p = subprocess.run([PY, *EXITS], cwd=db.HERE, capture_output=True, text=True, timeout=120)
+        out = [l.strip() for l in (p.stdout + p.stderr).strip().splitlines()
+               if any(k in l for k in ("CLOSE", "reconcile", "exit", "FAILED", "Traceback", "Error", "lock", "closed"))][:8]
+        log(f"exits rc={p.returncode} {time.time()-t0:.1f}s " + " / ".join(out))
+        return p.returncode
+    except subprocess.TimeoutExpired:
+        log("exits TIMEOUT after 120s"); return -1
+
+
+def next_due():
+    """Earliest pending exit wake-up (UTC datetime) or None; never raises."""
+    try:
+        import paper_trader
+        con = db.connect()
+        try:
+            return paper_trader.next_exit_due(con)
+        finally:
+            con.close()
+    except Exception as e:
+        log(f"next_due error: {e}"); return None
+
+
 def tick(n, is_open, light=False):
     if light:   # US closed, Swiss window: Swiss arm only
         if swiss_enabled():
@@ -94,6 +127,7 @@ def tick(n, is_open, light=False):
             f.write(db.iso(db.utcnow()))
         return
     if is_open:
+        exits_step()                       # first: exits must never wait behind slow collectors
         step(["volume_alerts.py"])
         step(["news.py", "fetch"])
         if n % 3 == 0:
@@ -149,8 +183,15 @@ def loop():
                 wait = min(wait, (now.timestamp() // TICK + 1) * TICK + 5 - now.timestamp())
         log(f"tick {n} done (market {'open' if is_open else 'closed'}{', swiss-only' if light else ''}); sleeping {wait:.0f}s")
         end = time.time() + wait
+        due = next_due() if is_open else None
         while not _stop and time.time() < end:
-            time.sleep(min(5, end - time.time()))
+            if due is not None and db.utcnow().timestamp() >= due.timestamp() + 3:
+                log(f"exit wake-up for due {db.iso(due)}")
+                exits_step()
+                nd = next_due()
+                due = nd if nd is not None and nd > due else None   # no busy-loop on a stuck exit; next tick retries
+                continue
+            time.sleep(max(0.1, min(5, end - time.time())))
     log("collector loop stopped")
     try:
         if open(PID).read().strip() == str(os.getpid()):

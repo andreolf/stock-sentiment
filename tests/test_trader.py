@@ -138,7 +138,7 @@ CON = db.connect()   # one shared connection: separate ones would deadlock on un
 def reset(con):
     con.rollback()
     for t in ("signals", "volume_spikes", "paper_trades", "decisions", "media", "news", "sec_filings", "earnings_events",
-              "decision_returns", "random_baseline"):
+              "decision_returns", "random_baseline", "earnings"):
         con.execute(f"DELETE FROM {t}")
     con.commit()
 
@@ -324,6 +324,142 @@ class TraderV2(unittest.TestCase):
         self.assertEqual(self.rules()[("earnings_drift", "earnings")], ("trade", "long"))
         due = self.con.execute("SELECT exit_due FROM paper_trades").fetchone()[0]
         self.assertEqual(db.parse_ts(due).astimezone(et).strftime("%H:%M"), "15:45")
+
+
+class ExitEnforcement(unittest.TestCase):
+    """2026-10-21 incident: TSLA time exit due 11:08 ET was missed because exits only ran inside the 30-min routine
+    (last run 13 s before exit_due). Exits now run from the 5-min collector (--exits-only) and at each exit_due;
+    plus the hard rule: flat before 15:45 ET when the ticker reports after today's close."""
+    ET = db.ZoneInfo("America/New_York")
+
+    def setUp(self):
+        self.con = CON; reset(self.con)
+        # a fixed trading day, 11:00 ET
+        self.day = db.datetime(2026, 10, 21, 11, 0, tzinfo=self.ET).astimezone(db.timezone.utc)
+
+    def at(self, hh, mm, ss=0):
+        return db.datetime(2026, 10, 21, hh, mm, ss, tzinfo=self.ET).astimezone(db.timezone.utc)
+
+    def entry(self, ticker="TSLA", side="buy", qty=12, due=None, ts=None):
+        cur = self.con.execute("""INSERT INTO paper_trades(ts,ticker,side,qty,limit_price,status,alpaca_order_id,purpose,
+                                  filled_qty,filled_avg_price,exit_due,mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (db.iso(ts or self.at(10, 8, 8)), ticker, side, qty, 386.0, "filled", "e1", "entry", qty,
+                                385.955, db.iso(due) if due else None, "live-paper"))
+        self.con.commit(); return cur.lastrowid
+
+    def earnings(self, ticker="TSLA", tod="after-hours", date="2026-10-21"):
+        self.con.execute("INSERT INTO earnings(ticker,date,time_of_day) VALUES (?,?,?)", (ticker, date, tod)); self.con.commit()
+
+    def fc(self, positions):
+        fc = FakeClient(positions=positions)
+        fc.orders_by_id["e1"] = {"id": "e1", "symbol": "TSLA", "status": "filled", "filled_qty": "12", "filled_avg_price": "385.955"}
+        return fc
+
+    def pos(self, sym="TSLA", qty="12"):
+        return {"symbol": sym, "qty": qty, "market_value": "4600", "avg_entry_price": "385.955", "unrealized_plpc": "0"}
+
+    def trader(self, fc, now, flat=False):
+        return Trader(fc, self.con, {}, live=True, now=now, kill_path="/nonexistent/KILL", core=["TSLA", "NVDA", "PLTR"],
+                      flat_before_close=flat)
+
+    def test_exits_only_fires_time_exit_and_never_enters(self):
+        self.entry(due=self.at(11, 8, 8))
+        TraderV2.spike(type("S", (), {"con": self.con, "now": self.at(11, 9)})(), "up"); self.con.commit()
+        fc = self.fc([self.pos()])
+        self.trader(fc, self.at(11, 8, 0)).run_exits(); self.con.commit()
+        self.assertEqual(fc.closed, [])                         # 8 s early: not yet
+        self.trader(fc, self.at(11, 8, 11)).run_exits(); self.con.commit()
+        self.assertEqual(fc.closed, ["TSLA"])
+        self.assertEqual(fc.placed, [])                          # exits-only never opens trades
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 0)
+        ex = self.con.execute("SELECT * FROM paper_trades WHERE purpose='exit'").fetchone()
+        self.assertEqual((ex["side"], ex["qty"], ex["notes"]), ("sell", 12, "time exit"))
+        self.trader(fc, self.at(11, 9)).run_exits(); self.con.commit()
+        self.assertEqual(fc.closed, ["TSLA"])                   # no double close
+
+    def test_short_time_exit_buys_back(self):
+        self.entry("NVDA", "sell", 22, due=self.at(12, 7, 55), ts=self.at(11, 7, 55))
+        fc = self.fc([self.pos("NVDA", "-22")])
+        self.trader(fc, self.at(12, 8, 0)).run_exits(); self.con.commit()
+        self.assertEqual(fc.closed, ["NVDA"])
+        self.assertEqual(self.con.execute("SELECT side FROM paper_trades WHERE purpose='exit'").fetchone()[0], "buy")
+
+    def test_earnings_after_close_flattens_before_1545(self):
+        self.earnings("TSLA", "after-hours")
+        self.entry(due=self.at(15, 59))                          # exit_due later than the cut
+        fc = self.fc([self.pos()])
+        self.trader(fc, self.at(15, 39)).run_exits(); self.con.commit()
+        self.assertEqual(fc.closed, [])
+        self.trader(fc, self.at(15, 40, 5)).run_exits(); self.con.commit()
+        self.assertEqual(fc.closed, ["TSLA"])
+        self.assertIn("earnings", self.con.execute("SELECT notes FROM paper_trades WHERE purpose='exit'").fetchone()[0])
+
+    def test_earnings_rule_covers_untracked_and_unknown_time_not_premarket(self):
+        self.earnings("TSLA", None)                              # unknown time -> treated as after close
+        self.earnings("PLTR", "pre-market")                      # pre-market report: already out, no flatten
+        fc = FakeClient(positions=[self.pos("TSLA"), self.pos("PLTR", "5")])
+        self.trader(fc, self.at(15, 41)).run_exits(); self.con.commit()
+        self.assertEqual(fc.closed, ["TSLA"])
+        self.assertIsNone(self.con.execute("SELECT parent_id FROM paper_trades WHERE purpose='exit'").fetchone()[0])
+
+    def test_earnings_other_day_ignored(self):
+        self.earnings("TSLA", "after-hours", "2026-10-22")
+        fc = FakeClient(positions=[self.pos("TSLA")])
+        self.trader(fc, self.at(15, 44)).run_exits()
+        self.assertEqual(fc.closed, [])
+
+    def test_entry_exit_due_capped_and_blocked_after_cut(self):
+        self.earnings("TSLA", "after-hours")
+        for when, expect_trade in ((self.at(15, 0), True), (self.at(15, 42), False)):
+            reset(self.con); self.earnings("TSLA", "after-hours")
+            self.con.execute("""INSERT INTO volume_spikes(ts,ticker,timeframe,detected_at,ratio,ret_pct,direction,flagged)
+                                VALUES (?,?,?,?,?,?,?,1)""", (db.iso(when - timedelta(minutes=10)), "TSLA", "5Min",
+                                                             db.iso(when - timedelta(minutes=4)), 4.2, 0.6, "up"))
+            self.con.execute("INSERT INTO media(id,ticker,created_at,outlet,tier,title,sentiment) VALUES (?,?,?,?,?,?,?)",
+                             ("n1", "TSLA", db.iso(when - timedelta(minutes=20)), "Reuters", 1,
+                              "Tesla raises delivery guidance after record China sales", 0.6))
+            self.con.commit()
+            fc = FakeClient(); self.trader(fc, when).run(); self.con.commit()
+            self.assertEqual(len(fc.placed), 1 if expect_trade else 0)
+            if expect_trade:
+                due = self.con.execute("SELECT exit_due FROM paper_trades").fetchone()[0]
+                self.assertEqual(db.parse_ts(due).astimezone(self.ET).strftime("%H:%M"), "15:40")
+            else:
+                self.assertIn("earnings after close", self.con.execute(
+                    "SELECT reason FROM decisions WHERE action='hypothetical' AND rule='v2_news_momentum'").fetchone()[0])
+
+    def test_next_exit_due(self):
+        import paper_trader
+        self.assertIsNone(paper_trader.next_exit_due(self.con, self.at(11, 0)))
+        self.entry("NVDA", "sell", 22, due=self.at(12, 7, 55))
+        self.assertEqual(paper_trader.next_exit_due(self.con, self.at(11, 0)), self.at(12, 7, 55))
+        self.entry("TSLA", due=self.at(15, 59)); self.earnings("TSLA")
+        self.con.execute("UPDATE paper_trades SET exit_due=NULL WHERE ticker='NVDA'"); self.con.commit()
+        self.assertEqual(paper_trader.next_exit_due(self.con, self.at(11, 0)), self.at(15, 40))
+
+    def test_lock_is_exclusive(self):
+        import paper_trader
+        p = os.path.join(tempfile.mkdtemp(), "pt.lock")
+        a = paper_trader.lock_file(p)
+        self.assertIsNotNone(a)
+        self.assertIsNone(paper_trader.lock_file(p))
+        a.close()
+        self.assertIsNotNone(paper_trader.lock_file(p))
+
+    def test_collector_runs_exits_first_on_open_tick(self):
+        import collector
+        calls = []
+        with mock.patch.object(collector, "exits_step", lambda: calls.append("exits")), \
+             mock.patch.object(collector, "step", lambda a, timeout=240: calls.append(a[0])), \
+             mock.patch.object(collector, "publish", lambda: None), \
+             mock.patch.object(collector, "swiss_enabled", lambda: False), \
+             mock.patch.object(collector, "HEART", os.path.join(tempfile.mkdtemp(), "hb")):
+            collector.tick(1, True)
+            self.assertEqual(calls[0], "exits")
+            calls.clear(); collector.tick(1, False)
+            self.assertNotIn("exits", calls)
+        self.assertIn("--exits-only", collector.EXITS)
+        self.assertNotIn("--live", [a for a in collector.EXITS if a != "--live-paper"])
 
 
 class Evaluation(unittest.TestCase):

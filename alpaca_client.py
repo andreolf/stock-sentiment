@@ -154,13 +154,18 @@ class AlpacaPaper:
             body["client_order_id"] = client_order_id
         return self._t("POST", "/orders", body=body)
 
-    def close_position(self, symbol):
+    def close_position(self, symbol, wait_steps=20):
         """Market-close a position (Alpaca DELETE /positions/{symbol}); cancel its open bracket legs first."""
+        import time
         for o in self.orders("open", symbols=[symbol]):
             try:
                 self.cancel_order(o["id"])
             except AlpacaError:
                 pass
+        for _ in range(wait_steps):          # legs hold the shares until the cancel is final
+            if not self.orders("open", symbols=[symbol]):
+                break
+            time.sleep(0.5)
         return self._t("DELETE", f"/positions/{symbol}")
 
     def calendar(self, start, end):

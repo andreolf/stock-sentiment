@@ -60,6 +60,7 @@ $P composite.py --source routine
 
 # 4. paper trading (v2 rules): reconcile open paper orders/positions, time exits, news-gated entries, earnings drift
 $P paper_trader.py --live-paper          # add --flat-before-close on the last run of the session
+#    (exits are ALSO enforced by the collector every 5 min and at each exit_due; see 'Exit enforcement' below)
 
 # 5. dashboard (English, Zurich time) -> dashboard/index.html + dashboard/latest.png, then publish to GitHub Pages
 #    (copies into docs/, commits + pushes only docs/ and only if changed; rate-limited to 15 min, PNG 6 h; never fails)
@@ -133,6 +134,18 @@ Evidence: vault note Research-2026-10-21-sentiment-trading-comparables.
 - Size: 0.5% of equity at risk / stop distance, capped at 5% of equity per trade and 20% total exposure.
 - Exits: bracket legs; time exit at `exit_due` (60 min; earnings 15:45 ET) or with `--flat-before-close` ≤ 15 min
   before the close → legs cancelled, position market-closed. Unfilled entries cancelled after 10 min.
+- **Exit enforcement (since 2026-10-21)**: the collector runs `paper_trader.py --live-paper --exits-only
+  --flat-before-close` first on every open 5-min tick AND wakes at the earliest pending `exit_due` (+3 s), so time
+  exits fire within seconds. `--exits-only` = reconcile + exits, never entries, zero X calls. A flock
+  (`data/paper_trader.lock`) stops the routine and the collector from managing exits at the same time (routine waits
+  ≤120 s, collector skips). `close_position` cancels the bracket legs and waits until they are gone before the
+  market close. Incident: the TSLA 60-min exit due 11:08:08 ET was missed because exits only ran inside the
+  30-min routine (that run was 13 s before exit_due; next one ~30 min late). Closed manually 11:09:22 ET.
+- **HARD RULE: no position through an earnings report.** Any open position (tracked or untracked) in a ticker with
+  earnings after today's close (`earnings` table, date = today ET, time_of_day not pre-market; unknown time counts
+  as after close) is market-closed at ≥ 15:40 ET (`earnings_flat_by_et`) so it is flat before 15:45 ET. New entries
+  in such a ticker get `exit_due` capped at 15:40 ET; after 15:40 ET they are logged hypothetical only.
+  Make sure `earnings.py fetch` has run today (the routine does it first) or the rule has no calendar to read.
 - One position per ticker; shorts only if shortable + easy to borrow. Kill switch: `touch data/KILL`.
 
 ## Public repo + GitHub Pages (publish_dashboard.sh)
@@ -152,7 +165,9 @@ Evidence: vault note Research-2026-10-21-sentiment-trading-comparables.
 `data/collector.pid`, heartbeat `data/collector.heartbeat`, logs `data/logs/collector-YYYY-MM-DD.log` (+
 `collector.stdout.log`). Market open (Alpaca clock): every 5 min volume_alerts, news, composite, dashboard (+ publish_dashboard.sh); every 15
 min also media, reddit, edgar, earnings events. Market closed: every 30 min news, media, earnings events, dashboard.
-Zero X calls; never trades. Needs ALPACA_PAPER_* in the environment of whoever starts it (`ensure` restarts it).
+Zero X calls; never opens trades, but it ENFORCES EXITS (paper only): `paper_trader.py --exits-only` first on every
+open tick and at each `exit_due` (log lines `exits rc=...` / `exit wake-up for due ...`). Needs ALPACA_PAPER_* in the
+environment of whoever starts it (`ensure` restarts it). After code changes: `collector.py stop` then `start`.
 Swiss arm: `swiss.py collect` runs on every tick (US open: every 5 min). With the US market closed, the loop still
 wakes every 5 min inside the Swiss window (weekdays 06:30-18:30 Zurich) for a light Swiss-only tick, and does the
 full slow tick (+ `swiss.py evaluate`) every 30 min.
@@ -253,7 +268,8 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
   `earnings.py`, `edgar.py`, `composite.py`, `collector.py`, `dashboard.py`, `config.json`
 - `tests/test_sources.py` media helpers, composite math, Form 4 parsing, earnings session logic
 - `tests/test_trader.py` sizing (5%/20% caps, volatility sizing), bracket levels/ATR, paper-only URL guard,
-  news gate (fresh/stale/contradicting/SEC), v2 rules with a fake client, earnings pause/drift, evaluation slippage
+  news gate (fresh/stale/contradicting/SEC), v2 rules with a fake client, earnings pause/drift, evaluation slippage,
+  ExitEnforcement (exits-only timing, short buy-back, earnings flat-by-15:40 incl. untracked, exit_due cap, lock, collector order)
 - `budget.py` ledger (`check N` / `record N note [--force]` / `status [--days K]`), cap 150/day UTC+8
 - `db.py` schema + helpers; DB `data/sentiment.db` (posts, post_batches, scores, counts, runs, signals,
   signal_returns, paper_trades). Env `STOCK_SENT_DB` / `STOCK_SENT_BUDGET` override paths (tests).

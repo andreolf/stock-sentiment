@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Turn triggers into Alpaca PAPER bracket orders (v2 rules), and manage/reconcile them. Default is DRY RUN.
 
-Usage: paper_trader.py [--live-paper] [--flat-before-close] [--now ISO]
+Usage: paper_trader.py [--live-paper] [--flat-before-close] [--exits-only] [--now ISO]
+  --exits-only  reconcile + exits only (no triggers, no entries, zero X calls). The 5-min collector runs this
+                every tick and also wakes exactly at the next exit_due, so time exits fire within ~1 min.
 
 Triggers (each considered once, if younger than signal_max_age_min = 45):
   sentiment_shock follow signals, composite follow signals, flagged IEX volume spikes on core tickers
@@ -23,6 +25,10 @@ Orders: bracket (limit entry at IEX mid +/- 5 bps, take-profit limit, stop-loss 
   (positions + open entry orders), whole shares.
 Exits: bracket legs on Alpaca; time exit when exit_due passes (60 min, earnings: 15:45 ET) or with
   --flat-before-close <= 15 min before the close -> cancel the legs and market-close the position.
+EARNINGS HARD RULE: any open position (tracked or not) in a ticker with earnings after today's close (earnings table,
+  date = today ET, time_of_day not pre-market; unknown time counts as after-hours) is flattened once ET time >=
+  earnings_flat_by_et (15:40) so it is flat before 15:45 ET; new entries in such a ticker get exit_due capped at that
+  time, and after it no new entry is opened (hypothetical "earnings after close today").
 Unfilled entries are cancelled after entry_timeout_min (10). Every run first reconciles open paper orders.
 Kill switch: data/KILL or trading_enabled=false -> no new entries (exits still managed).
 DRY RUN (default): reads Alpaca, places/cancels nothing and writes nothing.
@@ -43,7 +49,8 @@ DEFAULTS = {"trading_enabled": True, "max_trade_pct": 0.05, "max_total_pct": 0.2
             "entry_timeout_min": 10, "allow_short": True, "flat_before_close_min": 15, "risk_per_trade_pct": 0.5,
             "atr_mult_stop": 1.5, "tp_mult": 2.0, "min_stop_pct": 0.4, "max_stop_pct": 4.0, "news_window_min": 60,
             "news_novelty_min": 0.5, "news_min_tier": 2, "earnings_hold_until_et": "15:45",
-            "earnings_entry_after_et": "10:00", "bracket": True}
+            "earnings_entry_after_et": "10:00", "bracket": True,
+            "earnings_flat_by_et": "15:40"}
 
 
 # ---------- pure helpers (unit-tested) ----------
@@ -111,6 +118,63 @@ class ObserveOnlyRefused(RuntimeError):
 def assert_tradable(sym, blocked):
     if (sym or "").upper() in blocked:
         raise ObserveOnlyRefused(f"{sym} is flagged observe_only (Swiss observe arm): orders are refused")
+
+
+def after_close_earnings_today(con, now):
+    """Tickers (upper) with an earnings report today (ET date) that is not pre-market (unknown time -> after close)."""
+    today = str(now.astimezone(ET).date())
+    out = set()
+    try:
+        rows = con.execute("SELECT ticker, time_of_day FROM earnings WHERE date=?", (today,)).fetchall()
+    except Exception:
+        return out
+    for r in rows:
+        tod = (r["time_of_day"] or "").lower()
+        if "pre" in tod or "before" in tod or "bmo" in tod:
+            continue
+        out.add(r["ticker"].upper())
+    return out
+
+
+def et_at(now, hhmm):
+    h, m = map(int, hhmm.split(":"))
+    return now.astimezone(ET).replace(hour=h, minute=m, second=0, microsecond=0)
+
+
+def lock_file(path, wait=0.0):
+    """Exclusive non-blocking flock so the routine and the collector never manage exits at the same time.
+    -> file handle (keep it open) or None if another paper_trader holds the lock."""
+    import fcntl
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    import time
+    f = open(path, "a")
+    end = time.time() + wait
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.time() >= end:
+                f.close(); return None
+            time.sleep(0.5)
+
+
+def next_exit_due(con, now=None):
+    """Earliest pending wake-up for exits: min exit_due of open filled/pending entries, plus today's earnings
+    flat-by time if an entry in an after-close-earnings ticker is open. -> datetime (UTC) or None."""
+    now = now or db.utcnow()
+    cfg = {**DEFAULTS, **db.load_config().get("paper_trader", {})}
+    earn = after_close_earnings_today(con, now)
+    best = None
+    for r in con.execute("""SELECT ticker, exit_due FROM paper_trades WHERE purpose='entry' AND closed_at IS NULL
+                            AND alpaca_order_id IS NOT NULL AND (COALESCE(filled_qty,0) > 0 OR status IN (%s))"""
+                         % ",".join("?" * len(OPEN)), tuple(OPEN)):
+        cands = [db.parse_ts(r["exit_due"])] if r["exit_due"] else []
+        if r["ticker"].upper() in earn:
+            cands.append(et_at(now, cfg["earnings_flat_by_et"]).astimezone(db.timezone.utc))
+        for c in cands:
+            best = c if best is None or c < best else best
+    return best
 
 
 def flip(d):
@@ -182,43 +246,67 @@ class Trader:
                 self.say(f"  reconcile #{r['id']} {r['ticker']} {r['side']} {r['purpose']}: {r['status']} -> {st} (filled {fq:g})")
 
     # ----- 2) exits -----
+    def earnings_flat_due(self):
+        """-> set of tickers that must be flat now (after-close earnings today and ET time >= earnings_flat_by_et)."""
+        if self.now < et_at(self.now, self.cfg["earnings_flat_by_et"]):
+            return set()
+        return after_close_earnings_today(self.con, self.now)
+
+    def _close(self, sym, p, reason, entry=None):
+        msg = f"{'CLOSE' if self.live else 'DRY-RUN would close'} {sym} {p['qty']} ({reason}; legs cancelled, market)"
+        oid, status = None, "dry_run"
+        if self.live:
+            try:
+                o = self.c.close_position(sym) or {}
+                oid, status = o.get("id"), o.get("status")
+            except AlpacaError as ex:
+                self.say(f"  CLOSE FAILED {sym}: {ex}"); return False
+        self.say("  " + msg)
+        qty = float(p["qty"])
+        side = ("sell" if entry["side"] == "buy" else "buy") if entry else ("sell" if qty > 0 else "buy")
+        self._write("""INSERT INTO paper_trades(ts, ticker, side, qty, status, alpaca_order_id, signal_id, purpose, parent_id,
+                       mode, notes, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (db.iso(self.now), sym, side, abs(qty), status, oid, entry["signal_id"] if entry else None, "exit",
+                     entry["id"] if entry else None, "live-paper", reason, db.iso(self.now)))
+        return True
+
     def manage_exits(self, positions, clock):
         pos = {p["symbol"]: p for p in positions}
         mins_to_close = None
         if clock.get("is_open") and clock.get("next_close"):
             mins_to_close = (db.parse_ts(clock["next_close"]) - self.now).total_seconds() / 60
+        earn_flat = self.earnings_flat_due()
+        handled = set()
         for e in self.con.execute("""SELECT * FROM paper_trades WHERE purpose='entry' AND closed_at IS NULL
                                      AND COALESCE(filled_qty,0) > 0""").fetchall():
             if self.con.execute("SELECT 1 FROM paper_trades WHERE parent_id=? AND purpose='exit' AND status IN (%s)"
                                 % ",".join("?" * len(OPEN)), (e["id"], *OPEN)).fetchone():
-                continue
+                handled.add(e["ticker"]); continue
             p = pos.get(e["ticker"])
             if p is None:
                 self.say(f"  {e['ticker']} entry #{e['id']} has no open position (bracket leg or exit filled) -> closed")
                 self._write("UPDATE paper_trades SET closed_at=? WHERE id=?", (db.iso(self.now), e["id"]))
                 continue
             reason = None
-            if e["exit_due"] and db.parse_ts(e["exit_due"]) <= self.now:
+            if e["ticker"].upper() in earn_flat:
+                reason = "earnings after close today: flat before 15:45 ET"
+            elif e["exit_due"] and db.parse_ts(e["exit_due"]) <= self.now:
                 reason = "time exit"
             elif self.flat and mins_to_close is not None and mins_to_close <= self.cfg["flat_before_close_min"]:
                 reason = "flat before close"
             if not reason:
                 continue
+            handled.add(e["ticker"])
             if not clock.get("is_open"):
                 self.say(f"  exit due for {e['ticker']} #{e['id']} ({reason}) but market closed; next run"); continue
-            msg = f"{'CLOSE' if self.live else 'DRY-RUN would close'} {e['ticker']} {p['qty']} ({reason}; legs cancelled, market)"
-            oid, status = None, "dry_run"
-            if self.live:
-                try:
-                    o = self.c.close_position(e["ticker"]) or {}
-                    oid, status = o.get("id"), o.get("status")
-                except AlpacaError as ex:
-                    self.say(f"  CLOSE FAILED {e['ticker']}: {ex}"); continue
-            self.say("  " + msg)
-            self._write("""INSERT INTO paper_trades(ts, ticker, side, qty, status, alpaca_order_id, signal_id, purpose, parent_id,
-                           mode, notes, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (db.iso(self.now), e["ticker"], "sell" if e["side"] == "buy" else "buy", abs(float(p["qty"])), status,
-                         oid, e["signal_id"], "exit", e["id"], "live-paper", reason, db.iso(self.now)))
+            self._close(e["ticker"], p, reason, e)
+        # hard rule also covers positions this script did not open (manual / untracked)
+        for sym, p in pos.items():
+            if sym in handled or sym.upper() not in earn_flat:
+                continue
+            if not clock.get("is_open"):
+                self.say(f"  earnings flat due for untracked {sym} but market closed"); continue
+            self._close(sym, p, "earnings after close today: flat before 15:45 ET (untracked position)")
 
     # ----- 3) triggers -----
     def triggers(self):
@@ -274,6 +362,8 @@ class Trader:
                  "held": {p["symbol"] for p in positions} | {o["symbol"] for o in open_orders}}
         killed = os.path.exists(self.kill) or not self.cfg["trading_enabled"]
         eidx, etrade = self.earnings_state()
+        earn_today = after_close_earnings_today(self.con, self.now)
+        earn_cut = et_at(self.now, self.cfg["earnings_flat_by_et"])
 
         def try_trade(rule, trig, direction, news_ref, exit_due, note):
             side = "buy" if direction == "long" else "sell"
@@ -286,6 +376,8 @@ class Trader:
                 why = "market closed"
             elif trig["ticker"] in state["held"]:
                 why = "already have position/order in ticker"
+            elif trig["ticker"].upper() in earn_today and self.now >= earn_cut:
+                why = "earnings after close today (past flat-by time)"
             elif side == "sell" and not self.shortable(trig["ticker"]):
                 why = "not shortable / shorts disabled"
             lp = self.quote_limit(trig["ticker"], side) if not why else None
@@ -300,6 +392,9 @@ class Trader:
                            dist, self.cfg["risk_per_trade_pct"])
             if qty < 1:
                 self.decide(rule, trig, direction, "hypothetical", "size 0 (exposure cap)", lp, news_ref); return
+            if trig["ticker"].upper() in earn_today and (not exit_due or db.parse_ts(exit_due) > earn_cut):
+                exit_due = db.iso(earn_cut)                # never hold into tonight's report
+                note += "; exit_due capped (earnings after close)"
             pt = self.place(trig["ticker"], side, qty, lp, stop, tp, trig["id"] if trig["type"] != "earnings" else None,
                             exit_due, f"{rule}: {note}; ATR1h={a and round(a, 2)} stop {stop} tp {tp}")
             if pt is not False:
@@ -373,6 +468,16 @@ class Trader:
                            "live-paper", note, db.iso(self.now)))
         return cur.lastrowid if cur else None
 
+    def run_exits(self):
+        """Reconcile + exits only (collector, every 5 min and at each exit_due). No entries, no X."""
+        clock = self.c.clock()
+        self.reconcile()
+        if self.live:
+            self.con.commit()
+        self.manage_exits(self.c.positions(), clock)
+        if self.live:
+            self.con.commit()
+
     def run(self):
         acct, clock = self.c.account(), self.c.clock()
         self.say(f"paper_trader v2 {'LIVE-PAPER' if self.live else 'DRY-RUN'} @ {db.local(self.now)} | equity "
@@ -395,10 +500,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--live-paper", action="store_true", help="actually send PAPER orders (default: dry run)")
     ap.add_argument("--flat-before-close", action="store_true")
+    ap.add_argument("--exits-only", action="store_true", help="reconcile + exits only (no entries)")
     ap.add_argument("--now", help="override current time (ISO UTC), for testing")
     a = ap.parse_args()
-    Trader(AlpacaPaper(), db.connect(), db.load_config().get("paper_trader", {}), live=a.live_paper,
-           now=db.parse_ts(a.now) if a.now else None, flat_before_close=a.flat_before_close).run()
+    lk = lock_file(os.path.join(db.HERE, "data", "paper_trader.lock"),
+                                    wait=0 if a.exits_only else 120) if a.live_paper else True
+    if lk is None:
+        print("paper_trader: another instance holds the lock; skipping"); return 0
+    t = Trader(AlpacaPaper(), db.connect(), db.load_config().get("paper_trader", {}), live=a.live_paper,
+               now=db.parse_ts(a.now) if a.now else None, flat_before_close=a.flat_before_close)
+    t.run_exits() if a.exits_only else t.run()
     return 0
 
 
