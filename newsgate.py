@@ -12,12 +12,19 @@ Company focus (2026-10-21, after the NVDA short backed by 'Cyclicals Top Sectors
   from config.json newsgate.aliases. Generic market/sector recaps and movers lists (newsgate.generic_patterns) never
   qualify; index/basket headlines ('Dow ...', 'Chip Stocks ...', newsgate.index_patterns) qualify only if the
   headline itself names the company. The Benzinga `symbols` tag alone is never enough. SEC filings are exempt.
+Source quality (2026-10-22, after the NVDA short 17:04 Zurich backed by the Moomoo community post
+  '$NVIDIA (NVDA.US)$ haiyaaaa... uncle shaking² hand look at it. itchy hand want to click buy.' via Google News):
+  every media row is re-classified at gate time with media.classify(outlet, title, url) (stored tiers are only
+  demoted, never promoted): social/community/forum/UGC sources (Moomoo/Futu, Stocktwits, Reddit, TradingView, Webull,
+  Tiger, X, YouTube, ...) and post-style headlines ('$NAME (TICKER.US)$', leading or multiple cashtags, chatter) -> tier
+  4; Google News items from outlets not on config media.tier2_outlets -> tier 3. Benzinga headlines get the same
+  headline-style check. Tier > max_tier never qualifies (listed in `rejected`).
 Headlines whose effective sentiment clearly contradicts the trade direction (s * dir < -0.1) are rejected.
 Best = SEC filing first, then lower tier, then higher novelty.
 """
 import re
 from datetime import timedelta
-import db
+import db, media
 
 _CFG = None
 
@@ -72,6 +79,13 @@ def about_company(ticker, headline, teaser=None, aliases=None):
     return False, "company not named (symbols tag only)"
 
 
+def source_tier(stored_tier, outlet, title, url=None, feed=None):
+    """(effective tier, reason): media.classify() can only demote the stored tier (never promote it)."""
+    ct, why = media.classify(outlet, title, url, google=media.is_google_feed(feed))
+    st = stored_tier if stored_tier is not None else ct
+    return (st, why) if ct <= 2 else (max(st, ct), why)
+
+
 def words(t):
     t = re.sub(r"\s+-\s+[^-]{2,60}$", "", t or "")
     return set(w for w in re.findall(r"[a-z0-9$]+", t.lower()) if len(w) > 2)
@@ -93,7 +107,8 @@ def novelty(con, ticker, title, created_at):
 
 
 def hard_news(con, ticker, at_iso, direction=None, window_min=60, novelty_min=0.5, max_tier=2, rejected=None):
-    """`rejected`: optional list that collects (title, reason) for candidates dropped by the company-focus check."""
+    """`rejected`: optional list that collects (title, reason) for candidates dropped by the source-quality check
+    (stored tier <= max_tier but re-classified above it) or the company-focus check."""
     at = db.parse_ts(at_iso)
     lo, hi = db.iso(at - timedelta(minutes=window_min)), db.iso(at + timedelta(minutes=5))
     sign = {"long": 1, "short": -1}.get(direction, 0)
@@ -105,11 +120,21 @@ def hard_news(con, ticker, at_iso, direction=None, window_min=60, novelty_min=0.
         return {"kind": "sec", "ref": r["accession"], "title": f"{r['form']} {r['items'] or ''}".strip(),
                 "created_at": r["filed_at"], "novelty": 1.0, "sentiment": None, "tier": 0}
     cands = []
-    for r in con.execute("""SELECT id, title, created_at, tier, COALESCE(agent_sentiment, sentiment) s FROM media
-                            WHERE ticker=? AND tier<=? AND created_at BETWEEN ? AND ?""", (ticker, max_tier, lo, hi)):
-        cands.append(("media", r["id"], r["title"], None, r["created_at"], r["tier"], r["s"]))
+    for r in con.execute("""SELECT id, title, created_at, tier, outlet, url, feed, COALESCE(agent_sentiment, sentiment) s FROM media
+                            WHERE ticker=? AND created_at BETWEEN ? AND ?""", (ticker, lo, hi)):
+        tier, why = source_tier(r["tier"], r["outlet"], r["title"], r["url"], r["feed"])
+        if tier > max_tier:
+            if rejected is not None and (r["tier"] or 99) <= max_tier:   # newly rejected by the source check
+                rejected.append((r["title"], f"source T{tier}: {why}"))
+            continue
+        cands.append(("media", r["id"], r["title"], None, r["created_at"], tier, r["s"]))
     for r in con.execute("SELECT id, headline, summary, created_at, sentiment FROM news WHERE ticker=? AND created_at BETWEEN ? AND ?",
                          (ticker, lo, hi)):
+        hs = media.headline_style(r["headline"])
+        if hs:
+            if rejected is not None:
+                rejected.append((r["headline"], f"source T{media.TIER_UGC}: {hs}"))
+            continue
         cands.append(("benzinga", r["id"], r["headline"], r["summary"], r["created_at"], 2, r["sentiment"]))
     best = None
     for kind, ref, title, teaser, ts, tier, s in cands:

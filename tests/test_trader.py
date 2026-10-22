@@ -250,6 +250,69 @@ class NewsGateCompanyFocus(unittest.TestCase):
         self.assertEqual(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "short")["kind"], "sec")
 
 
+class NewsGateSourceQuality(unittest.TestCase):
+    """2026-10-22: NVDA short 17:04 Zurich was backed by a Moomoo community post via Google News. Social/community/UGC
+    sources, post-style headlines and unvetted Google News outlets never back a trade; real outlets still do."""
+    MOOMOO = "$NVIDIA (NVDA.US)$ haiyaaaa... uncle shaking\u00b2 hand look at it. itchy hand want to click buy."
+
+    def setUp(self):
+        self.con = CON; reset(self.con)
+        self.now = db.utcnow().replace(microsecond=0)
+
+    def add(self, mid, outlet, title, feed="gn_NVDA", tier=2, s=-0.3, ago=10, ticker="NVDA", url=None):
+        self.con.execute("INSERT INTO media(id,ticker,created_at,outlet,tier,title,url,feed,sentiment) VALUES (?,?,?,?,?,?,?,?,?)",
+                         (mid, ticker, db.iso(self.now - timedelta(minutes=ago)), outlet, tier, title, url, feed, s))
+
+    def test_moomoo_post_rejected(self):
+        self.add("f065c8e3e8117ec1", "Moomoo", self.MOOMOO, s=-0.2)   # stored as tier 2 by the old classifier
+        rej = []
+        self.assertIsNone(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "short", rejected=rej))
+        self.assertIsNone(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "long"))
+        self.assertEqual(len(rej), 1)
+        self.assertIn("T4", rej[0][1])
+
+    def test_post_style_headline_rejected_even_from_real_outlet_and_benzinga(self):
+        self.add("p1", "Reuters", self.MOOMOO, feed="reuters_gn", tier=1)
+        self.con.execute("INSERT INTO news(id,ticker,created_at,headline,summary,source,symbols,sentiment) VALUES (?,?,?,?,?,?,?,?)",
+                         ("b1", "NVDA", db.iso(self.now - timedelta(minutes=5)), "$NVDA $AMD lol gonna rip", "", "benzinga", "NVDA", 0.4))
+        self.assertIsNone(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "long"))
+
+    def test_social_sources_rejected(self):
+        for i, o in enumerate(["Stocktwits", "TradingView", "Reddit", "Webull", "Tiger Brokers", "X", "YouTube", "\u5bcc\u9014\u725b\u725b",
+                               "Futu", "Seeking Alpha Comments", "Some Investor Community"]):
+            self.add(f"s{i}", o, f"Nvidia unveils new AI chip number {i}")
+        self.add("y1", "Yahoo Finance", "Nvidia unveils a brand new robotics platform", feed="yahoo_NVDA",
+                 url="https://stocktwits.com/news-articles/markets/equity/nvidia-x")             # Stocktwits copy in a direct feed
+        self.assertIsNone(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "short"))
+
+    def test_unvetted_google_news_outlet_rejected(self):
+        self.add("u1", "shattered.io", "Nvidia Stock Slides 3% After China Export Report")
+        self.add("u2", "", "Nvidia shares slide on China export report")
+        self.assertIsNone(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "short"))
+
+    def test_real_reuters_and_cnbc_headlines_still_pass(self):
+        self.add("m1", "Moomoo", self.MOOMOO, s=-0.2, ago=12)
+        self.add("r1", "Reuters", "Nvidia shares fall after US widens AI chip export curbs to China", feed="gn_tier1_NVDA", tier=1, ago=8)
+        n = newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "short")
+        self.assertEqual((n["ref"], n["tier"]), ("r1", 1))
+        reset(self.con)
+        self.add("c1", "CNBC", "Nvidia stock drops as U.S. weighs new chip export limits", feed="cnbc_tech", tier=1)
+        self.assertEqual(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "short")["ref"], "c1")
+
+    def test_whitelisted_tier2_outlets_pass(self):
+        for i, o in enumerate(["Yahoo Finance", "MarketWatch", "Barron's", "Benzinga", "24/7 Wall St.", "Investopedia",
+                               "Associated Press", "Investor's Business Daily", "Yahoo Finance UK"]):
+            reset(self.con)
+            self.add(f"w{i}", o, f"Nvidia shares slip as export curbs widen to {i} more countries")
+            n = newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "short")
+            self.assertIsNotNone(n, o)
+            self.assertEqual(n["tier"], 2, o)
+
+    def test_moomoo_syndicated_dow_jones_copy_passes_as_tier2(self):
+        self.add("d1", "Moomoo", "Nvidia Gets a China Boost but the Stock Is Still Falling -- Barrons.com")
+        self.assertEqual(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "short")["tier"], 2)
+
+
 class FakeClient:
     def __init__(self, positions=None, is_open=True, equity=100_000):
         self.placed, self.cancelled, self.closed = [], [], []

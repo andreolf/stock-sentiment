@@ -14,6 +14,40 @@ class Media(unittest.TestCase):
         self.assertEqual(media.tier_of("The Wall Street Journal", t1), 1)
         self.assertEqual(media.tier_of("Yahoo Finance", t1), 2)
 
+    def test_classify_source_quality(self):
+        import json
+        cfg = json.load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")))["media"]
+        c = lambda o, t="Nvidia shares rise after earnings beat", url=None, google=True: media.classify(o, t, url, cfg, google)[0]
+        for o in ("Reuters", "Bloomberg.com", "The Wall Street Journal", "CNBC", "Financial Times", "BNN Bloomberg"):
+            self.assertEqual(c(o), 1, o)
+        for o in ("Yahoo Finance", "Yahoo Finance UK", "MarketWatch", "Barron's", "Benzinga", "24/7 Wall St.", "Investopedia",
+                  "Associated Press", "AP News", "Investor's Business Daily", "Forbes", "Morningstar", "Investing.com India",
+                  "cash.ch (AWP)", "finews.ch", "NZZ"):
+            self.assertEqual(c(o), 2, o)
+        for o in ("Moomoo", "\u5bcc\u9014\u725b\u725b", "Stocktwits", "TradingView", "Reddit", "r/wallstreetbets", "Webull", "Tiger Trade",
+                  "X", "Twitter", "YouTube", "Medium", "someone.substack.com", "InvestorsHub", "HotCopper"):
+            self.assertEqual(c(o), media.TIER_UGC, o)
+        for o in ("shattered.io", "Startup Fortune", "AD HOC NEWS", "Some Random Blog", "", "(per item)"):
+            self.assertEqual(c(o), media.TIER_UNVETTED, o)
+        self.assertEqual(c("Yahoo Finance", url="https://stocktwits.com/news-articles/x", google=False), media.TIER_UGC)
+        self.assertEqual(c("Yahoo Finance", url="https://finance.yahoo.com/news/x.html", google=False), 2)
+        self.assertEqual(c("Teslarati", google=False), 2)                      # directly configured feed
+        self.assertEqual(c("Moomoo", "Tesla Stock Edges Higher After Company Reports Results -- WSJ"), 2)   # syndicated copy
+        self.assertEqual(c("Reuters", "$NVIDIA (NVDA.US)$ haiyaaaa... uncle shaking\u00b2 hand look at it."), media.TIER_UGC)
+
+    def test_headline_style(self):
+        bad = ["$NVIDIA (NVDA.US)$ haiyaaaa... uncle shaking\u00b2 hand look at it. itchy hand want to click buy.",
+               "Can Tesla (TSLA.US) shares hit $4,400?", "$NVDA to the moon", "$TSLA $NVDA $PLTR all green today",
+               "lol nvda gonna rip", "haiyaaaa nvda again..."]
+        good = ["Nvidia shares fall after US widens AI chip export curbs", "Watching $PLTR; Hearing SwingTrader Buys Stock",
+                "Tesla Stock At $4,400? Cathie Wood's ARK Pins Hopes On Robotaxis", "Nvidia rises from $180 to $200 after deal",
+                "Palantir stock jumps 5% on new federal cloud pa...", "Musk: 'We are gonna win' on robotaxi, Tesla says",
+                "Tesla shares rise as Elon Musk reveals new clues regarding a merger", "Why Is Nvidia Stock Falling Today?"]
+        for h in bad:
+            self.assertIsNotNone(media.headline_style(h), h)
+        for h in good:
+            self.assertIsNone(media.headline_style(h), h)
+
     def test_matchers(self):
         m = media.matchers({"match": {"META": ["Meta Platforms", "META"], "TSLA": ["Tesla", "TSLA"]}}, ["META", "TSLA"])
         self.assertTrue(m["META"].search("Meta Platforms beats estimates"))

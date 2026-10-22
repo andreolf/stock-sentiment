@@ -35,7 +35,9 @@ sentiment sets the direction, attention amplifies it.
 ## Trading rules (paper)
 
 - **v2_news_momentum**: trade *with* a sentiment shock / composite / volume spike only if a fresh (≤ 60 min), novel
-  tier-1/2 or Benzinga headline (or an 8-K / insider buy) backs it (`newsgate.py`).
+  tier-1/2 or Benzinga headline (or an 8-K / insider buy) that names the company backs it (`newsgate.py`). Tier 2 is a
+  whitelist of real outlets; social/community posts (Moomoo, Stocktwits, Reddit, TradingView, X, …), cashtag-style
+  posts and unvetted Google News sources never count.
 - **v2_attention_fade**: attention without news → logged as a paper-only fade hypothetical, never an order.
 - **earnings_drift**: days 1–3 after a report, only if EPS surprise, opening gap and post-release news agree.
 - Orders are Alpaca **paper** brackets: limit entry, stop = 1.5 × ATR(14) on 1h bars (0.4–4%), take-profit = 2 × stop.

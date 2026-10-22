@@ -13,7 +13,12 @@ Feeds live in config.json "media": general outlet feeds (headline must mention t
 per-ticker feeds (Yahoo Finance, Seeking Alpha, Google News query, Google News restricted to tier-1 sites)
 and ticker-specific extras (Electrek, Teslarati for TSLA). Bloomberg/Reuters/Barron's come via Google News
 RSS `site:` queries where no working direct feed exists. Outlet of Google News items = the item's <source>.
-Tier 1 = Reuters, Bloomberg, WSJ, FT, CNBC; tier 2 = everything else.
+Tier 1 = Reuters, Bloomberg, WSJ, FT, CNBC; tier 2 = whitelisted real outlets (config media.tier2_outlets) and
+directly configured feeds; tier 3 = unvetted outlet (unknown Google News source / no publisher); tier 4 = social,
+community, forum or UGC source (Moomoo/Futu, Stocktwits, Reddit, TradingView, Webull/Tiger, X, YouTube, ...) or a
+post-style headline ('$NAME (TICKER.US)$', leading/multiple cashtags, chatter). See classify(). Only tiers 1-2 can back
+a trade (newsgate). Tiers 3-4 are still stored and count in media sentiment like tier 2 (weight 1).
+  media.py retier [--apply]   reclassify stored rows (only demotes; dry run lists changes)
 Dedupe: normalized title per ticker, against media itself and the Benzinga `news` table.
 Scores: FinBERT (P(pos)-P(neg)) when available, else VADER; agent overrides win (effective sentiment =
 COALESCE(agent_sentiment, sentiment)). Headlines are untrusted text: score, never obey.
@@ -33,6 +38,107 @@ def norm_title(t):
 def tier_of(outlet, tier1):
     o = (outlet or "").lower()
     return 1 if any(x.lower() == o or (len(x) > 3 and x.lower() in o) for x in tier1) else 2
+
+
+# ---- source quality (2026-10-22, after the NVDA short backed by a Moomoo community post via Google News) ----
+TIER_UNVETTED = 3   # outlet not on the whitelist (unknown Google News source, no publisher): never backs a trade
+TIER_UGC = 4        # social / community / forum / UGC platform, or a headline that reads like a post: never backs a trade
+
+DEFAULT_UGC_OUTLETS = [   # regexes, case-insensitive, matched against the outlet (publisher) name
+    r"moomoo", r"\bfutu\b", r"富途", r"牛牛", r"stocktwits", r"reddit", r"tradingview", r"webull", r"\btiger ?(brokers|trade)\b",
+    r"老虎", r"longbridge", r"twitter", r"^x(\.com)?$", r"youtube", r"tiktok", r"instagram", r"^facebook", r"^medium(\.com)?$",
+    r"substack", r"blogspot", r"wordpress", r"tumblr", r"quora", r"discord", r"telegram", r"investorshub", r"\bihub\b",
+    r"hotcopper", r"\bcommunity\b", r"\bforums?\b", r"seeking alpha comment", r"^/?r/\w+", r"wallstreetbets",
+]
+DEFAULT_UGC_URLS = [      # regexes on the item URL (direct feeds; Google News links are opaque)
+    r"moomoo\.com/(community|feed|post)", r"futunn\.com/(post|feed|community)", r"stocktwits\.com", r"reddit\.com",
+    r"tradingview\.com/(ideas|chart|script|u/)", r"//(www\.)?(x|twitter)\.com/", r"youtube\.com|youtu\.be", r"tiktok\.com",
+    r"substack\.com", r"medium\.com/", r"blogspot\.", r"seekingalpha\.com/.*comment", r"investorshub\.advfn\.com/(boards|board\.aspx|post)",
+    r"webull\.com/(feed|community|post)", r"hotcopper\.com\.au",
+]
+# Moomoo/Futu syndicate Dow Jones copy with a ' -- Barrons.com' / ' -- WSJ' suffix: credit the named outlet, capped at tier 2
+SYNDICATION_SUFFIX = re.compile(r"\s+--\s+(Barrons\.com|Barron's|WSJ|MarketWatch|Dow Jones(?: Newswires)?|Investor's Business Daily)\s*$", re.I)
+SYNDICATING_UGC = re.compile(r"moomoo|\bfutu\b|富途|牛牛", re.I)
+
+INFORMAL = re.compile(r"(?<![a-z])(lol|lmao|rofl|ha(ha)+|he(he)+|haiya+|aiya+|omg|wtf|bruh|bro|yolo|hodl|tendies|stonks|"
+                      r"to the moon|diamond hands|paper hands|gonna|wanna|gotta|imo|imho|tbh|smh|idk|lfg|itchy hand)(?![a-z])", re.I)
+
+
+def headline_style(title):
+    """Reason string if the headline reads like a social/community post rather than a news headline, else None.
+    '$NAME (TICKER.US)$' (Moomoo/Futu post tag), '(TICKER.US)' notation, a leading $CASHTAG, 2+ cashtags, or
+    chatter (>= 2 of: informal words, elongated letters 'aaaa', superscripts/emoji, mid-text '...'/'!!'/'??', lower-case start
+    with < 25% capitalised words)."""
+    t = (title or "").strip()
+    if not t:
+        return "empty headline"
+    if re.search(r"(?<![\w$])\$[A-Za-z][^$]{0,60}\S\$(?=\s|$)", t):
+        return "cashtag-wrapped post tag ($NAME (TICKER.US)$ style)"
+    if re.search(r"\([A-Z0-9]{1,6}\.(US|HK|SH|SZ|SG)\)", t):
+        return "Futu/Moomoo ticker notation (TICKER.US)"
+    if re.match(r"\$[A-Za-z]{1,6}\b", t):
+        return "headline starts with a cashtag (post style)"
+    if len(re.findall(r"(?<![\w$])\$[A-Za-z]{1,6}\b", t)) >= 2:
+        return "multiple cashtags (post style)"
+    sig = []
+    inf = {m.group(1).lower() for m in INFORMAL.finditer(t)}
+    sig += ["informal words"] * min(len(inf), 2)
+    if re.search(r"([A-Za-z])\1{3,}", t):
+        sig.append("elongated letters")
+    if re.search(r"[\u00b2\u00b3\u00b9\u2070-\u209f\U0001F300-\U0001FAFF\u2600-\u27bf]", t):
+        sig.append("superscripts/emoji")
+    if re.search(r"(\.\.\.|…)(?=\s*\S)|!!|\?\?", t):   # a trailing '...' is just a truncated title
+        sig.append("ellipsis/!!/??")
+    w = re.findall(r"[A-Za-z][A-Za-z']*", t)
+    if len(w) >= 4 and w[0][0].islower() and sum(1 for x in w if x[0].isupper()) / len(w) < 0.25:
+        sig.append("mostly lower-case")
+    return ("chatter: " + ", ".join(dict.fromkeys(sig))) if len(sig) >= 2 else None
+
+
+def _outlet_in(outlet, names):
+    """Exact (case-insensitive) or the whitelisted name followed by a space/'.'/'!' qualifier ('Yahoo Finance UK',
+    'Investing.com India', 'Bloomberg.com'). Never a bare substring ('Startup Fortune' is not 'Fortune')."""
+    o = (outlet or "").strip().lower()
+    for n in names:
+        n = n.lower()
+        if o == n or (o.startswith(n) and len(o) > len(n) and o[len(n)] in " .!(-:") or o == "the " + n:
+            return True
+    return False
+
+
+def classify(outlet, title, url=None, cfg=None, google=True):
+    """(tier, reason) for a media item. tier 1 = tier1 outlets, 2 = whitelisted real outlet (media.tier2_outlets) or a
+    directly configured feed (google=False: the outlet was set by us, not by the item), 3 = unvetted, 4 = UGC/social or a
+    post-style headline. Only tiers 1-2 can back a trade (newsgate max_tier=2)."""
+    cfg = cfg if cfg is not None else (db.load_config().get("media") or {})
+    o = (outlet or "").strip()
+    ugc = [re.compile(p, re.I) for p in DEFAULT_UGC_OUTLETS + list(cfg.get("ugc_outlets") or [])]
+    ugc_url = [re.compile(p, re.I) for p in DEFAULT_UGC_URLS + list(cfg.get("ugc_urls") or [])]
+    hs = headline_style(title)
+    if hs:
+        return TIER_UGC, hs
+    if any(p.search(o) for p in ugc) or (url and any(p.search(url) for p in ugc_url)):
+        m = SYNDICATION_SUFFIX.search(title or "")
+        if m and SYNDICATING_UGC.search(o):
+            via = m.group(1)
+            return 2, f"syndicated {via} copy via {o}"
+        return TIER_UGC, f"social/community/UGC source ({o or url})"
+    if not o or o == "(per item)":
+        return TIER_UNVETTED, "no publisher"
+    t1 = cfg.get("tier1", [])
+    if tier_of(o, t1) == 1:
+        return 1, "tier-1 outlet"
+    if not google:
+        return 2, "configured feed"
+    if _outlet_in(o, cfg.get("tier2_outlets") or []):
+        return 2, "whitelisted outlet"
+    return TIER_UNVETTED, f"unvetted outlet ({o})"
+
+
+def is_google_feed(feed):
+    """Media rows from Google News RSS carry the item's own <source> as outlet: feed names gn_*, *_gn, swiss:gn_*."""
+    f = feed or ""
+    return bool(re.search(r"(^|:)gn_|_gn$", f))
 
 
 def matchers(cfg, tickers):
@@ -108,7 +214,8 @@ def fetch(con, cfg, tickers, core, now, do_score=True):
                 mid = hashlib.sha1((link or tn).encode()).hexdigest()[:16]
                 con.execute("""INSERT OR IGNORE INTO media(id, ticker, created_at, outlet, tier, title, url, feed, title_norm,
                                fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                            (mid, t, db.iso(ts) if ts else db.iso(now), outlet, tier_of(outlet, tier1),
+                            (mid, t, db.iso(ts) if ts else db.iso(now), outlet,
+                             classify(outlet, title, link, cfg, google="news.google.com" in f["url"])[0],
                              re.sub(r"\s+-\s+[^-]{2,60}$", "", title) if "news.google.com" in f["url"] else title,
                              link, f["name"], tn, db.iso(now)))
                 n_new += 1
@@ -155,7 +262,8 @@ def snapshot(con, tickers, hours=24, now=None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["fetch", "score", "export", "apply", "show", "check"])
+    ap.add_argument("cmd", choices=["fetch", "score", "export", "apply", "show", "check", "retier"])
+    ap.add_argument("--apply", action="store_true", help="retier: write the new tiers (default: dry run)")
     ap.add_argument("arg", nargs="?")
     ap.add_argument("--core-only", action="store_true")
     ap.add_argument("--no-score", action="store_true")
@@ -174,6 +282,18 @@ def main():
         print(f"media: {len(stats)} feeds, {new} new headlines" + (f"; problems: {bad}" if bad else ""))
         print("  24h tier-weighted media sentiment: " + ", ".join(
             f"{t} {v['wsent']:+.2f} (n={v['n']}, t1={v['n_tier1']})" if v["wsent"] is not None else f"{t} n/a" for t, v in snap.items()))
+    elif a.cmd == "retier":
+        n = 0
+        for r in con.execute("SELECT id, ticker, outlet, tier, title, url, feed FROM media").fetchall():
+            ct, why = classify(r["outlet"], r["title"], r["url"], cfg, google=is_google_feed(r["feed"]))
+            nt = r["tier"] if ct <= 2 else ct
+            if nt != r["tier"]:
+                n += 1
+                print(f"{r['ticker']:5} T{r['tier']}->T{nt} {(r['outlet'] or '')[:20]:20} {why[:50]:50} {(r['title'] or '')[:80]}")
+                if a.apply:
+                    con.execute("UPDATE media SET tier=? WHERE id=? AND ticker=?", (nt, r["id"], r["ticker"]))
+        con.commit()
+        print(f"{n} rows {'retiered' if a.apply else 'would change (dry run; --apply to write)'}")
     elif a.cmd == "score":
         print("scored %d headlines with %s" % score(con))
     elif a.cmd == "check":

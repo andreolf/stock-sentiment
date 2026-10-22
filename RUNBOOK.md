@@ -131,6 +131,20 @@ Evidence: vault note Research-2026-10-21-sentiment-trading-comparables.
   any plural "stocks") pass only when the headline itself names the company. The Benzinga `symbols` tag alone never
   counts; SEC filings are exempt. Origin: NVDA short 2026-10-21 17:08 Zurich backed by "Cyclicals Top Sectors In
   Wednesday Trading As Defensives Trail" (no Nvidia mention). `hard_news(..., rejected=[])` lists dropped headlines.
+  **Source quality (2026-10-22)**: only a REAL news item counts. At gate time every media row is re-classified by
+  `media.classify(outlet, title, url)` (stored tiers can only be demoted): social/community/forum/UGC sources
+  (Moomoo/Futu/富途牛牛, Stocktwits incl. stocktwits.com links in the Yahoo feed, Reddit, TradingView, Webull, Tiger,
+  Longbridge, X/Twitter, YouTube, Substack/Medium/blogspot, InvestorsHub boards, HotCopper, '…community/forum…') and
+  post-style headlines ('$NAME (TICKER.US)$', '(TICKER.US)', leading or ≥2 cashtags, chatter = ≥2 of informal words /
+  'aaaa' / superscripts-emoji / mid-text '...' / lower-case start) → **tier 4**; a Google News `<source>` that is not on
+  `config.json media.tier2_outlets` (or tier1), or no publisher → **tier 3**. Tiers 3–4 never pass (max_tier 2).
+  Benzinga headlines get the same headline-style check. Directly configured feeds (Yahoo, Seeking Alpha, MarketWatch,
+  Electrek, Teslarati, Swiss feeds) keep their configured outlet (URL + headline checks still apply). Moomoo/Futu copies
+  of Dow Jones stories ('… -- Barrons.com' / '-- WSJ') count as tier 2. To admit a real outlet add it to
+  `media.tier2_outlets`; to block a UGC blog add a regex to `media.ugc_outlets` / `media.ugc_urls`; then
+  `media.py retier [--apply]` (dry run by default; back up the DB first) re-tiers stored rows. Origin: NVDA short
+  2026-10-22 17:04 Zurich backed by the Moomoo post "$NVIDIA (NVDA.US)$ haiyaaaa... uncle shaking² hand look at it.
+  itchy hand want to click buy." (tier 2 under the old 'everything else = tier 2' rule).
 - **v2_attention_fade**: attention-only triggers (no fresh news) → paper-only fade hypothetical, never an order.
 - **v1_follow_spike**: the retired rule (sentiment_shock follow + agreeing spike) is still logged as a hypothetical.
 - **earnings_drift**: reaction days 1–3, only if surprise (|≥2%|), the real opening gap (|≥1%|) and post-release
@@ -237,7 +251,9 @@ Research-2026-10-21-swiss-market-focus.
   Finance + Seeking Alpha + Google News (general + tier-1-sites query; titles must name the company), Electrek and
   Teslarati for TSLA. Dead as of 2026-10-21: reutersagency.com feed (404), finance.yahoo.com/news/rssindex (404),
   barrons.com RSS (403). Deduped by normalized title per ticker against itself and Benzinga. Tier 1 = Reuters,
-  Bloomberg, WSJ, FT, CNBC. Scored by FinBERT (ProsusAI/finbert, CPU; P(pos) − P(neg)), VADER fallback; agent
+  Bloomberg, WSJ, FT, CNBC. Tier 2 = `media.tier2_outlets` whitelist + configured feeds; tier 3 = unvetted Google News
+  source; tier 4 = social/UGC or post-style headline (see Source quality above; tiers 3-4 still count in media sentiment
+  with weight 1, as tier 2 did). Scored by FinBERT (ProsusAI/finbert, CPU; P(pos) − P(neg)), VADER fallback; agent
   overrides (`media.py apply`) win.
 - `composite.py`: z-scored X sentiment, X volume ratio, Reddit mention change, tier-weighted media sentiment, media
   headline-count change (after ≥ 3 days of collection), IEX volume ratio → signed composite (sentiment sets the
@@ -290,10 +306,11 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
 - `alpaca_client.py` paper-only REST client (CLI: account | positions | orders | clock | quote | bars)
 - `volume_alerts.py`, `paper_trader.py` (v2), `newsgate.py`, `news.py`, `media.py`, `finsent.py`, `reddit.py`,
   `earnings.py`, `edgar.py`, `composite.py`, `collector.py`, `dashboard.py`, `config.json`
-- `tests/test_sources.py` media helpers, composite math + z hygiene (X warmup weight 0, std floors, ±4 cap, NVDA
+- `tests/test_sources.py` media helpers (incl. source classify/tiers + post-style headlines), composite math + z hygiene (X warmup weight 0, std floors, ±4 cap, NVDA
   2026-10-21 regression), Form 4 parsing, earnings session logic
 - `tests/test_trader.py` sizing (5%/20% caps, volatility sizing), bracket levels/ATR, paper-only URL guard,
-  news gate (fresh/stale/contradicting/SEC; company focus: Cyclicals + SpaceX/chip-stocks rejected, genuine pass), v2 rules with a fake client, earnings pause/drift, evaluation slippage,
+  news gate (fresh/stale/contradicting/SEC; company focus: Cyclicals + SpaceX/chip-stocks rejected, genuine pass;
+  source quality: Moomoo post / social sources / unvetted outlets / cashtag posts rejected, Reuters + CNBC + tier-2 whitelist pass), v2 rules with a fake client, earnings pause/drift, evaluation slippage,
   ExitEnforcement (exits-only timing, short buy-back, earnings flat-by-15:40 incl. untracked, exit_due cap, 15:00 ET entry block, lock, collector order)
 - `budget.py` ledger (`check N` / `record N note [--force]` / `status [--days K]`), cap 150/day UTC+8
 - `db.py` schema + helpers; DB `data/sentiment.db` (posts, post_batches, scores, counts, runs, signals,
@@ -323,3 +340,9 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
 - 2026-10-22: tests refuse to run if STOCK_SENT_DB resolves to the live data/sentiment.db (an import-order slip in a new
   test module let test_trader.reset() wipe news/media/signals/decisions/paper_trades/volume_spikes/earnings in the live DB;
   restored from the 2026-10-21 23:35 backup + Alpaca news backfill + RSS refetch + Alpaca paper order history + dashboard).
+- 2026-10-22: news gate source quality (media.classify / headline_style, newsgate.source_tier; config media.tier2_outlets,
+  ugc_outlets, ugc_urls): social/community/UGC sources and '$NAME (TICKER.US)$'/cashtag/chatter headlines -> tier 4, unvetted
+  Google News outlets -> tier 3; neither can back a trade. Stored rows re-tiered with `media.py retier --apply` (271 rows,
+  backup data/sentiment.db.bak-20261022-231138). Origin: NVDA short 17:04 Zurich backed by a Moomoo community post. Replay:
+  that trigger would STILL have passed, now backed by the Motley Fool/Yahoo ETF piece 'Nvidia, Apple, Alphabet, Microsoft,
+  and Amazon Now Make Up 30.8% of VOO…' (multi-company basket headline; not covered by this fix, open question).
