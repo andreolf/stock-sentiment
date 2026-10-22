@@ -11,6 +11,10 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 os.environ.setdefault("STOCK_SENT_DB", os.path.join(tempfile.mkdtemp(), "sw.db"))
 import db, swiss, swiss_news, collector
+
+# 2026-10-22: never run against the live DB (an import-order slip once let test_trader.reset() wipe data/sentiment.db)
+if os.path.realpath(db.DB_PATH) == os.path.realpath(os.path.join(db.HERE, "data", "sentiment.db")):
+    raise RuntimeError("tests resolved STOCK_SENT_DB to the live data/sentiment.db; refusing to run")
 from alpaca_client import AlpacaPaper, ObserveOnlyError
 from paper_trader import Trader, ObserveOnlyRefused, assert_tradable
 
@@ -488,6 +492,46 @@ class BrokerAndHoldingsHeadlines(unittest.TestCase):
                      ("UBS", "UBS verkauft Beteiligung an Swisscard"),
                      ("UBS", "Grossaktionär erhöht Anteil an der UBS"),
                      ("UBS", "UBS erhöht Kapitalpuffer")]:
+            self.assertFalse(swiss_news.other_subject(t, h, n), f"{t}: {h}")
+            self.assertTrue(swiss_news.relevant(t, h, SO, n), f"{t}: {h}")
+
+
+class BehaeltBeiHeadlines(unittest.TestCase):
+    """2026-10-22: 'Allianz : UBS behält seine Neutral-Empfehlung bei und erhöht das Kursziel' (obs #31) passed as UBS news."""
+    def test_behaelt_bei_reiterations_rejected(self):
+        n = SO["names"]
+        for h in ["Allianz : UBS behält seine Neutral-Empfehlung bei und erhöht das Kursziel von 450 EUR auf 460 EUR.",
+                  "Allianz : UBS behält seine Neutral-Empfehlung bei…",
+                  "SpaceX (Space Exploration Technologies) : UBS behält die Bewertung Kaufen bei",
+                  "X-Energy, Inc. : UBS behält seine Kaufempfehlung bei",
+                  "UBS behält Einstufung 'Buy' für Allianz bei",
+                  "UBS behält Kursziel für Siemens bei",
+                  "Siemens-Aktie: UBS behält Empfehlung Kaufen bei",
+                  "Novartis AG : UBS behält Einstufung Kaufen bei"]:          # UBS still the broker (verb rule 1d)
+            self.assertTrue(swiss_news.other_subject("UBS", h, n), h)
+            self.assertFalse(swiss_news.relevant("UBS", h, SO, n), h)
+
+    def test_colon_prefixed_non_swiss_label_rejected(self):
+        n = SO["names"]
+        for h in ["Allianz : UBS erhöht Kursziel auf 460 EUR",
+                  "Genuine Parts Company : UBS bekräftigt seine neutrale Bewertung",
+                  "Northrop Grumman Corporation : UBS behält die Bewertung Kaufen bei",
+                  "Deutsche Telekom : UBS überzeugt von Wachstum"]:          # any verb after '<Other> : UBS'
+            self.assertTrue(swiss_news.other_subject("UBS", h, n), h)
+        self.assertTrue(swiss_news.swiss_listed("Roche Holding AG", n))
+        self.assertTrue(swiss_news.swiss_listed("Novartis AG", n))
+        self.assertFalse(swiss_news.swiss_listed("Allianz", n))
+
+    def test_self_and_swiss_label_cases_kept(self):
+        n = SO["names"]
+        for t, h in [("ALC", "Alcon bleibt auf 'Buy' - Berenberg verweist auf Dynamik bei Produkteinführungen"),
+                     ("UBS", "Lex UBS: Warum ein Wegzug kaum helfen würde"),
+                     ("UBS", "UBS fällt nach JPMorgan-Herabstufung"),
+                     ("UBS", "UBS Group AG : UBS bleibt bei Rückkaufprogramm"),
+                     ("UBS", "UBS behält Dividendenpolitik bei"),                  # no rating word
+                     ("UBS", "Jefferies behält UBS-Einstufung Buy bei"),          # UBS is the rated stock
+                     ("UBS", "Allianz : UBS-Aktie steigt"),                        # UBS stock itself after the colon
+                     ("UBS", "Roche Holding : UBS lanciert neuen Fonds")]:        # Swiss-listed label: colon rule 1c off
             self.assertFalse(swiss_news.other_subject(t, h, n), f"{t}: {h}")
             self.assertTrue(swiss_news.relevant(t, h, SO, n), f"{t}: {h}")
 

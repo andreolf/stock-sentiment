@@ -118,6 +118,20 @@ HOLDING_WORD = r"stakes?|holdings?|shareholdings?|positions?|interests? (?=in\b)
 # a sale/purchase of a stake is the company's own corporate deal (kept), not a holdings disclosure
 CORP_DEAL = r"(?i:sells?|sold|selling|buys?|bought|buying|acquires?|acquired|divests?|divested|verkauft|kauft|übernimmt|veräussert)"
 THRESHOLD_WORD = r"threshold|Schwelle|Meldeschwelle|Stimmrechte|voting rights|crosses|falls below|unterschreitet|überschreitet"
+# 'behält (seine/die) Neutral-Empfehlung/Einstufung/Kursziel/Bewertung Kaufen ... bei' = broker reiteration (2026-10-22, origin
+# 'Allianz : UBS behält seine Neutral-Empfehlung bei und erhöht das Kursziel'); the name must be the actor (checked in other_subject)
+BEHAELT = re.compile(r"\b(?:behält|behielt|beibehält)\s+(?:[\w'\"-]+\s+){0,4}?['\"]?(?:[\w-]*-)?(?:Kaufempfehlung|Verkaufsempfehlung|"
+                     r"Empfehlung|Einstufung|Kursziel\w*|Bewertung|Rating|Anlageurteil|Votum|Buy|Neutral|Sell|Hold|Overweight|"
+                     r"Underweight|Outperform|Underperform|Kaufen|Halten|Verkaufen)\b", re.I)
+# Swiss-listed companies: a '<Label> : UBS ...' MarketScreener headline with such a label is NOT auto-rejected by the generic
+# colon rule 1c (it still goes through the broker-verb rules); the tracked names' aliases are added at runtime.
+SWISS_LISTED = (r"Nestl[eé]|Roche|Novartis|UBS|Zurich Insurance|Zurich|ABB|Richemont|Sika|Holcim|Swiss Re|Lonza|Givaudan|"
+                r"Partners Group|Geberit|Alcon|Logitech|Sonova|Swisscom|K[uü]hne\s?\+\s?Nagel|Schindler|SGS|Julius B[aä]r|"
+                r"Swiss Life|Straumann|Helvetia|Baloise|Galderma|Sandoz|Lindt|Temenos|VAT Group|Swatch|Adecco|Clariant|"
+                r"Lindt & Spr[uü]ngli|Barry Callebaut|EMS-Chemie|Georg Fischer|Swiss Prime Site|PSP|Flughafen Z[uü]rich|"
+                r"Bachem|Siegfried|Tecan|Belimo|Vontobel|EFG|Cembra|Avolta|Dufry|SIG Group|Landis|Logitech|On Holding|Sulzer|"
+                r"Bucher|Schweiter|Emmi|Valiant|BKW|Galenica|Ypsomed|Inficon|Comet|Stadler|Implenia|Ams[- ]?Osram|"
+                r"Credit Suisse|Kantonalbank|Swiss|Schweiz\w*")
 _alias_re = {}
 
 
@@ -126,6 +140,12 @@ def alias_re(t, names):
         al = names.get(t, {}).get("aliases", [t])
         _alias_re[t] = re.compile("|".join(rf"(?i:\b{re.escape(a)}\b)" for a in al))
     return _alias_re[t]
+
+
+def swiss_listed(label, names):
+    """True when a headline label ('Novartis AG', 'Roche Holding') is a Swiss-listed company (SWISS_LISTED or a tracked name)."""
+    al = [re.escape(a) for v in names.values() for a in v.get("aliases", [])]
+    return bool(re.search(rf"\b(?:{SWISS_LISTED}{'|' + '|'.join(al) if al else ''})\b", label, re.I))
 
 
 def other_stocks(title, A):
@@ -154,6 +174,15 @@ def other_subject(t, title, names):
         if corp or re.search(RATING_MARK, rest) or BLEIBT_BEI.search(" " + m.group(2) + rest):
             return True
     if BLEIBT_BEI.search(title) and re.search(rf"(?:^|[:;,–—|-]\s*)(?:{pat})(?:[ -](?:AG|Group))?\s+bleibt\s+bei\b", title):
+        return True
+    # 1c) MarketScreener '<Other> : <name> ...' (space before the colon) where <Other> is a company that is not this name and
+    #     not Swiss-listed: this name acts on another company's stock, whatever the verb ('Allianz : UBS behält ... bei').
+    m = re.match(rf"^\s*([A-ZÄÖÜ][^:]{{1,80}}?)\s+:\s*(?:die |the )?(?:{pat})(?:[ -](?:AG|Group))?\b(?!-)", title)
+    if m and not A.search(m.group(1)) and not swiss_listed(m.group(1), names):
+        return True
+    # 1d) '<name> behält (seine/die) <Rating>/Einstufung/Empfehlung/Kursziel ... bei' with this name as the actor = broker reiteration
+    if re.search(rf"(?:^|[:;,–—|-]\s*)(?:die |the )?(?:{pat})(?:[ -](?:AG|Group|Analysten))?\s+(?:behält|behielt|beibehält)\b", title) \
+            and BEHAELT.search(title):
         return True
     # 2) the name is the ACTOR of a broker/commentary verb
     actor = re.compile(rf"(?:^|[:;,–—|-]\s*|\b(?:und|and|as|after|nach|da|weil|while|wie)\s+)(?:die |the )?(?:{pat})"
