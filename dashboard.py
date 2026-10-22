@@ -46,7 +46,7 @@ def table(headers, rows, empty="nothing yet"):
         return f'<div class="empty">{e(empty)}</div>'
     h = "".join(f"<th>{e(x)}</th>" for x in headers)
     b = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
-    return f'<div class="tw"><table><thead><tr>{h}</tr></thead><tbody>{b}</tbody></table></div>'
+    return f'<div class="tw"><table style="--cols:{len(headers)}"><thead><tr>{h}</tr></thead><tbody>{b}</tbody></table></div>'
 
 
 def alpaca_section(no_alpaca):
@@ -296,7 +296,7 @@ def main():
     gen = now.astimezone(ZRH).strftime("%a %d %b %Y %H:%M")
     swiss_html = swiss_panel(con, now)
 
-    page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>X-sentiment paper desk</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
@@ -316,6 +316,20 @@ td{{border-bottom:1px solid #21262d;padding:6px 8px;vertical-align:top}}tr:hover
 .pos{{color:var(--pos)}}.neg{{color:var(--neg)}}.empty{{color:var(--mut);font-style:italic;padding:6px 0}}a{{color:var(--fg);text-decoration:none}}a:hover{{color:var(--acc)}}
 footer{{padding:16px 26px;border-top:1px solid var(--line);color:var(--mut);font-size:13px;text-align:center}}a.credit{{color:var(--acc)}}a.credit:hover{{text-decoration:underline}}
 .pill{{display:inline-block;padding:1px 8px;border-radius:10px;background:#1f6feb33;color:var(--acc);font-size:12px}}
+/* responsive: fluid grids never exceed the viewport; grid children may shrink so wide tables scroll inside .tw */
+html{{-webkit-text-size-adjust:100%;text-size-adjust:100%}}
+.grid3{{grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr))}}.grid2{{grid-template-columns:repeat(auto-fit,minmax(min(520px,100%),1fr))}}
+main>*,.grid2>*,.grid3>*,.kpis>*,header>*{{min-width:0}}.tw{{max-width:100%;-webkit-overflow-scrolling:touch}}
+img,video{{max-width:100%;height:auto}}canvas{{max-width:100%}}h1,h2,h3{{overflow-wrap:anywhere}}
+@media (max-width:700px){{
+body{{font-size:15px}}header{{padding:14px 14px;display:block}}header>div+div{{margin-top:6px}}main{{padding:12px;gap:12px}}
+footer{{padding:16px 14px;font-size:14px;line-height:2}}h1{{font-size:18px}}h2{{font-size:16px}}h3{{font-size:15px}}
+.mut,.ks,.kl{{font-size:13px}}.kv{{font-size:20px}}.kpis{{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}}
+.grid2,.grid3{{grid-template-columns:minmax(0,1fr);gap:12px}}.kpi,.card{{padding:12px}}.ch{{height:230px}}
+table{{font-size:13px}}.tw table{{min-width:calc(var(--cols,4) * 80px)}}th,td{{padding:7px 8px}}td a{{display:inline-block;padding:4px 0}}
+a.credit{{padding:8px 2px}}
+}}
+@media (max-width:360px){{.kpis{{grid-template-columns:minmax(0,1fr)}}}}
 </style></head><body>
 <header><div><h1>X-sentiment paper desk <span class="pill">PAPER ONLY</span></h1>
 <div class="mut">TSLA · NVDA · PLTR core, IEX volume watchlist: {e(", ".join(allw))}</div></div>
@@ -359,8 +373,10 @@ footer{{padding:16px 26px;border-top:1px solid var(--line);color:var(--mut);font
 <script>
 const D={json.dumps(data)};
 const fmt=new Intl.DateTimeFormat('en-GB',{{timeZone:'Europe/Zurich',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}});
-Chart.defaults.color='#8b949e';Chart.defaults.borderColor='#21262d';Chart.defaults.font.size=11;
-const xs={{type:'linear',ticks:{{callback:v=>fmt.format(new Date(v)),maxTicksLimit:6,maxRotation:0}}}};
+Chart.defaults.color='#8b949e';Chart.defaults.borderColor='#21262d';Chart.defaults.font.size=11;const NARROW=innerWidth<700;
+const xs={{type:'linear',ticks:{{callback:v=>fmt.format(new Date(v)),maxTicksLimit:NARROW?4:6,maxRotation:0}}}};
+// narrow screens: pin the x range to the data so fewer ticks do not widen the axis
+const xr=arrs=>{{if(!NARROW) return xs;const v=[].concat(...arrs.map(a=>a||[])).map(p=>p[0]);return v.length?{{...xs,min:Math.min(...v),max:Math.max(...v)}}:xs}};
 const pts=a=>a.map(p=>({{x:p[0],y:p[1]}}));
 for(const [t,c] of Object.entries(D.charts)){{
   const el=document.getElementById('c_'+t); if(!el) continue;
@@ -370,7 +386,7 @@ for(const [t,c] of Object.entries(D.charts)){{
     {{type:'line',label:'Weighted sentiment',data:pts(c.sent),borderColor:'#3fb950',backgroundColor:'#3fb950',pointRadius:3,showLine:true,yAxisID:'ys'}}
   ]}},options:{{maintainAspectRatio:false,animation:false,interaction:{{mode:'nearest',intersect:false}},
     plugins:{{legend:{{labels:{{boxWidth:10}}}},tooltip:{{callbacks:{{title:i=>fmt.format(new Date(i[0].parsed.x))+' Zurich'}}}}}},
-    scales:{{x:xs,yv:{{position:'left',grid:{{display:false}},title:{{display:true,text:'posts/h'}}}},
+    scales:{{x:xr([c.counts,c.price,c.sent]),yv:{{position:'left',grid:{{display:false}},title:{{display:true,text:'posts/h'}}}},
       yp:{{position:'right',title:{{display:true,text:'$'}}}},ys:{{position:'right',min:-1,max:1,display:false}}}}}}}});
 }}
 const CC={{composite:['Composite','#e6edf3',2.5],z_x_sent:['X sent','#3fb950',1],z_x_vol:['X vol','#1f6feb',1],z_reddit_chg:['Reddit Δ','#ff7b72',1],
@@ -379,10 +395,10 @@ for(const [t,c] of Object.entries(D.charts)){{
   const el=document.getElementById('k_'+t); if(!el) continue;
   const ds=Object.entries(CC).filter(([k])=>(c.comp[k]||[]).length).map(([k,[l,col,w]])=>({{label:l,data:pts(c.comp[k]),borderColor:col,backgroundColor:col,borderWidth:w,pointRadius:w>2?2:0,tension:.2}}));
   new Chart(el,{{type:'line',data:{{datasets:ds}},options:{{maintainAspectRatio:false,animation:false,plugins:{{legend:{{labels:{{boxWidth:10}}}}}},
-    scales:{{x:xs,y:{{suggestedMin:-3,suggestedMax:3}}}}}}}});
+    scales:{{x:xr(Object.values(c.comp||{{}})),y:{{suggestedMin:-3,suggestedMax:3}}}}}}}});
 }}
 if(D.equity.length) new Chart(document.getElementById('c_eq'),{{type:'line',data:{{datasets:[{{label:'Equity $',data:pts(D.equity),borderColor:'#58a6ff',pointRadius:2,fill:true,backgroundColor:'#58a6ff22'}}]}},
-  options:{{maintainAspectRatio:false,animation:false,scales:{{x:{{type:'linear',ticks:{{callback:v=>new Intl.DateTimeFormat('en-GB',{{timeZone:'Europe/Zurich',day:'2-digit',month:'short'}}).format(new Date(v)),maxTicksLimit:6}}}}}}}}}});
+  options:{{maintainAspectRatio:false,animation:false,scales:{{x:{{type:'linear',ticks:{{callback:v=>new Intl.DateTimeFormat('en-GB',{{timeZone:'Europe/Zurich',day:'2-digit',month:'short'}}).format(new Date(v)),maxTicksLimit:NARROW?4:6}}}}}}}}}});
 </script></body></html>"""
     os.makedirs(OUT, exist_ok=True)
     path = os.path.join(OUT, "index.html")
