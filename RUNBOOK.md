@@ -179,6 +179,12 @@ min also media, reddit, edgar, earnings events. Market closed: every 30 min news
 Zero X calls; never opens trades, but it ENFORCES EXITS (paper only): `paper_trader.py --exits-only` first on every
 open tick and at each `exit_due` (log lines `exits rc=...` / `exit wake-up for due ...`). Needs ALPACA_PAPER_* in the
 environment of whoever starts it (`ensure` restarts it). After code changes: `collector.py stop` then `start`.
+Liveness (2026-10-22): `run` holds an exclusive flock on `data/collector.lock` (a second loop exits, rc 3), the heartbeat
+is JSON {ts, pid, phase, tick, last_tick, next_wake} rewritten before every step and every <= 60 s while sleeping, and
+`ensure` restarts when the pid is dead OR the heartbeat is > 900 s old (SIGTERM, SIGKILL after 20 s), adopts an orphan
+loop instead of starting a duplicate, and logs the box boot time. `status` exits 1 on a stale heartbeat. Origin: the box
+VM restarted ~16:06-16:09 UTC+8 Oct 22 and killed the loop (no in-process error); nothing ran `ensure` until 21:13.
+Nothing inside the box survives a VM restart, so something must call `ensure` outside US hours too (Swiss window).
 Swiss arm: `swiss.py collect` runs on every tick (US open: every 5 min). With the US market closed, the loop still
 wakes every 5 min inside the Swiss window (weekdays 06:30-18:30 Zurich) for a light Swiss-only tick, and does the
 full slow tick (+ `swiss.py evaluate`) every 30 min.
@@ -297,6 +303,7 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
   swiss_obs_returns, swiss_random, media_rejected, swiss_obs_skipped; feed status `data/swiss_feed_status.json`)
 - `tests/test_swiss.py` config, no-trade guarantee (trader + client), SIX math, headline rules, fake feeds (blocked feed
   skipped, dedupe, SER), observation rules, evaluation with slippage, X off, bad-quote guard, broker-action/holdings headlines
+- `tests/test_collector.py` heartbeat JSON/old format, single-instance lock, `ensure` stale-heartbeat restart / orphan adopt, loop survives exceptions
 - `tests/test_pipeline.py` synthetic end-to-end test (temp DB; signal fires, debounce, evaluate vs SPY)
 - `data/raw/YYYY-MM-DD/` raw X results · `data/scores/` agent score files
 - 2026-10-21: swiss_news.other_subject rejects MarketScreener '<Other>(, Inc./AG/SE/plc/Corp.) : <name> <verb>' + 'bleibt bei <Empfehlung/Rating/Buy/...>' broker reiterations; rescan quarantined sw3a2fec1fbc081b05 (Heartland Express, Inc. : UBS bleibt neutral).
@@ -310,3 +317,9 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
   'Herabstufung durch UBS', 'UBS-Herabstufung belastet <Other>', '<Other> falls after UBS downgrade' and holdings
   disclosures ('UBS Group AG Reduces/Increases Stake in <Other>', 'holding in <Other>', 'erhöht Anteil an <Other>',
   '<Other>: UBS … crosses 5% threshold'); stake sales/purchases ('UBS sells stake in …') stay as UBS news.
+- 2026-10-22: swiss_news.other_subject also rejects '<name> behält (seine/die) <Rating>/Einstufung/Empfehlung/Kursziel/Bewertung … bei'
+  (name as actor) and MarketScreener '<Other> : <name> …' (space before the colon) when <Other> is not this name and not
+  Swiss-listed (SWISS_LISTED + tracked aliases). Origin: 'Allianz : UBS behält seine Neutral-Empfehlung bei' (obs #31).
+- 2026-10-22: tests refuse to run if STOCK_SENT_DB resolves to the live data/sentiment.db (an import-order slip in a new
+  test module let test_trader.reset() wipe news/media/signals/decisions/paper_trades/volume_spikes/earnings in the live DB;
+  restored from the 2026-10-21 23:35 backup + Alpaca news backfill + RSS refetch + Alpaca paper order history + dashboard).

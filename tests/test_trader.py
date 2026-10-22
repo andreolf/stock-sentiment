@@ -9,6 +9,10 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["STOCK_SENT_DB"] = os.path.join(tempfile.mkdtemp(), "t.db")
 import db, newsgate, evaluate
+
+# 2026-10-22: never run against the live DB (an import-order slip once let test_trader.reset() wipe data/sentiment.db)
+if os.path.realpath(db.DB_PATH) == os.path.realpath(os.path.join(db.HERE, "data", "sentiment.db")):
+    raise RuntimeError("tests resolved STOCK_SENT_DB to the live data/sentiment.db; refusing to run")
 from alpaca_client import AlpacaPaper, PaperOnlyError, guard_url
 from paper_trader import Trader, size_qty, limit_price, exposure_of, atr, bracket_levels
 
