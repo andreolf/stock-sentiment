@@ -66,12 +66,14 @@ INFORMAL = re.compile(r"(?<![a-z])(lol|lmao|rofl|ha(ha)+|he(he)+|haiya+|aiya+|om
 
 def headline_style(title):
     """Reason string if the headline reads like a social/community post rather than a news headline, else None.
-    '$NAME (TICKER.US)$' (Moomoo/Futu post tag), '(TICKER.US)' notation, a leading $CASHTAG, 2+ cashtags, or
+    quote/listing pages ('Stock Price, News, Quote & History', 'Options Chain | Quotes & News'), '$NAME (TICKER.US)$' (Moomoo/Futu post tag), '(TICKER.US)' notation, a leading $CASHTAG, 2+ cashtags, or
     chatter (>= 2 of: informal words, elongated letters 'aaaa', superscripts/emoji, mid-text '...'/'!!'/'??', lower-case start
     with < 25% capitalised words)."""
     t = (title or "").strip()
     if not t:
         return "empty headline"
+    if re.search(r"stock price, news|news, quote|options chain|quotes? (&|and) news|price, news (&|and) analysis", t, re.I):
+        return "quote/listing page, not a news item"
     if re.search(r"(?<![\w$])\$[A-Za-z][^$]{0,60}\S\$(?=\s|$)", t):
         return "cashtag-wrapped post tag ($NAME (TICKER.US)$ style)"
     if re.search(r"\([A-Z0-9]{1,6}\.(US|HK|SH|SZ|SG)\)", t):

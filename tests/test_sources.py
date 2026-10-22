@@ -38,7 +38,8 @@ class Media(unittest.TestCase):
     def test_headline_style(self):
         bad = ["$NVIDIA (NVDA.US)$ haiyaaaa... uncle shaking\u00b2 hand look at it. itchy hand want to click buy.",
                "Can Tesla (TSLA.US) shares hit $4,400?", "$NVDA to the moon", "$TSLA $NVDA $PLTR all green today",
-               "lol nvda gonna rip", "haiyaaaa nvda again..."]
+               "lol nvda gonna rip", "haiyaaaa nvda again...", "Tesla, Inc. (TSLA.NE) Stock Price, News, Quote & History",
+               "PLTR 261023 197.50P (PLTR261023P197500) Stock Options Chain | Quotes & News"]
         good = ["Nvidia shares fall after US widens AI chip export curbs", "Watching $PLTR; Hearing SwingTrader Buys Stock",
                 "Tesla Stock At $4,400? Cathie Wood's ARK Pins Hopes On Robotaxis", "Nvidia rises from $180 to $200 after deal",
                 "Palantir stock jumps 5% on new federal cloud pa...", "Musk: 'We are gonna win' on robotaxi, Tesla says",

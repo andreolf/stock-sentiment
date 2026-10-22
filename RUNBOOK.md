@@ -135,7 +135,7 @@ Evidence: vault note Research-2026-10-21-sentiment-trading-comparables.
   `media.classify(outlet, title, url)` (stored tiers can only be demoted): social/community/forum/UGC sources
   (Moomoo/Futu/富途牛牛, Stocktwits incl. stocktwits.com links in the Yahoo feed, Reddit, TradingView, Webull, Tiger,
   Longbridge, X/Twitter, YouTube, Substack/Medium/blogspot, InvestorsHub boards, HotCopper, '…community/forum…') and
-  post-style headlines ('$NAME (TICKER.US)$', '(TICKER.US)', leading or ≥2 cashtags, chatter = ≥2 of informal words /
+  post-style headlines (quote/listing pages, '$NAME (TICKER.US)$', '(TICKER.US)', leading or ≥2 cashtags, chatter = ≥2 of informal words /
   'aaaa' / superscripts-emoji / mid-text '...' / lower-case start) → **tier 4**; a Google News `<source>` that is not on
   `config.json media.tier2_outlets` (or tier1), or no publisher → **tier 3**. Tiers 3–4 never pass (max_tier 2).
   Benzinga headlines get the same headline-style check. Directly configured feeds (Yahoo, Seeking Alpha, MarketWatch,
@@ -342,7 +342,8 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
   restored from the 2026-10-21 23:35 backup + Alpaca news backfill + RSS refetch + Alpaca paper order history + dashboard).
 - 2026-10-22: news gate source quality (media.classify / headline_style, newsgate.source_tier; config media.tier2_outlets,
   ugc_outlets, ugc_urls): social/community/UGC sources and '$NAME (TICKER.US)$'/cashtag/chatter headlines -> tier 4, unvetted
-  Google News outlets -> tier 3; neither can back a trade. Stored rows re-tiered with `media.py retier --apply` (271 rows,
-  backup data/sentiment.db.bak-20261022-231138). Origin: NVDA short 17:04 Zurich backed by a Moomoo community post. Replay:
+  Google News outlets -> tier 3; quote/listing pages ('Stock Price, News, Quote & History', 'Options Chain | Quotes & News')
+  -> tier 4; neither can back a trade. swiss_news stores the same classified tier for Google News CH items. Stored rows
+  re-tiered with `media.py retier --apply` (271 + 5 rows; backups data/sentiment.db.bak-20261022-231138 / -231720). Origin: NVDA short 17:04 Zurich backed by a Moomoo community post. Replay:
   that trigger would STILL have passed, now backed by the Motley Fool/Yahoo ETF piece 'Nvidia, Apple, Alphabet, Microsoft,
   and Amazon Now Make Up 30.8% of VOO…' (multi-company basket headline; not covered by this fix, open question).

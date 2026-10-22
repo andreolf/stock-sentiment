@@ -342,10 +342,11 @@ def fetch(con, conf=None, now=None, jobs=None, getter=get_feed, benzinga=True):
             # the HEADLINE must name the company, for general and fuzzy per-name feeds alike
             targets = [t for t in ([fixed] if fixed else tickers) if mt[t].search(title) and relevant(t, title, so, names)]
             lang = lang_of(title)
-            tier = media.tier_of(outlet, db.load_config().get("media", {}).get("tier1", [])) if outlet else f.get("tier", 2)
+            tier = media.classify(outlet, title, link, db.load_config().get("media", {}),
+                                  google="news.google.com" in f["url"])[0] if outlet else f.get("tier", 2)   # 2026-10-22: 3/4 = unvetted/UGC
             for t in targets:
                 s, scorer = (lex_de(title), "lex_de") if lang == "de" else (None, None)
-                row = store(con, t, created, outlet, min(tier, f.get("tier", 2)), title[:400], link, f["name"], now,
+                row = store(con, t, created, outlet, tier if tier > 2 else min(tier, f.get("tier", 2)), title[:400], link, f["name"], now,
                             s if s is not None else 0.0, scorer or "pending", lang, seen=seen)
                 if row:
                     row["kind"] = kind; new.append(row); n_new += 1
