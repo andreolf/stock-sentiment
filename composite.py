@@ -127,6 +127,27 @@ def combine(z):
     return S, (S + math.copysign(1, S) * st.mean(a) * 0.5) / math.sqrt(1.25)
 
 
+def missed_once(con, t, comp, now, comp_id, filt, reason, every_h=2, price_fn=None):
+    """Missed-call log for composite readings that did not become a signal; at most one per ticker+filter per
+    `every_h` hours (the 5-min collector would otherwise repeat the same reading ~24x)."""
+    if not (db.load_config().get("risk") or {}).get("log_missed_calls", True):
+        return
+    last = con.execute("SELECT MAX(ts) FROM missed_calls WHERE ticker=? AND filter=?", (t, filt)).fetchone()[0]
+    if last and db.parse_ts(last) > now - timedelta(hours=every_h):
+        return
+    price_fn = price_fn or db.latest_price
+    db.log_missed(con, t, "long" if comp > 0 else "short", filt, reason, ts=db.iso(now), signal_ts=db.iso(now),
+                  signal_price=price_fn(t), rule="composite", trigger_type="composite_reading", trigger_id=comp_id)
+
+
+def near_miss(con, t, comp, now, comp_id, price_fn=None):
+    """|composite| within risk.missed_threshold_band (0.5) below the 2.0 signal threshold -> 'threshold' missed call."""
+    band = (db.load_config().get("risk") or {}).get("missed_threshold_band", 0.5)
+    if band and 2 - band <= abs(comp) <= 2:
+        missed_once(con, t, comp, now, comp_id, "threshold", f"composite {comp:+.2f} below the 2.0 signal threshold",
+                    price_fn=price_fn)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("tickers", nargs="*")
@@ -151,10 +172,14 @@ def main():
                           sent_dir, composite, n_media, zmode, notes) VALUES ({','.join('?' * (5 + 2 * len(COMPS) + 3))})""",
                           (db.iso(now), t, a.source, *[raw[k] for k in COMPS], *[z[k] for k in COMPS], S, comp, n6, mode,
                            "; ".join(notes)))
+        if comp is not None and abs(comp) <= 2:
+            near_miss(con, t, comp, now, cur.lastrowid)
         if comp is not None and abs(comp) > 2:
             last = con.execute("SELECT MAX(ts) FROM signals WHERE ticker=? AND type='composite'", (t,)).fetchone()[0]
             if last and db.parse_ts(last) > now - timedelta(hours=2):
-                print(f"  composite |z|>2 for {t} but debounced"); continue
+                print(f"  composite |z|>2 for {t} but debounced")
+                missed_once(con, t, comp, now, cur.lastrowid, "debounce",
+                            f"composite {comp:+.2f} > 2 but debounced (composite signal < 2h ago)"); continue
             price = db.latest_price(t)
             d = "long" if comp > 0 else "short"
             for variant, direction in (("follow", d), ("fade", "short" if d == "long" else "long")):

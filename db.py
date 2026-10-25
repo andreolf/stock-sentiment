@@ -136,15 +136,24 @@ CREATE TABLE IF NOT EXISTS media_rejected (
 CREATE TABLE IF NOT EXISTS earnings (
   ticker TEXT NOT NULL, date TEXT NOT NULL, time_of_day TEXT, eps_estimate REAL, source TEXT,
   fetched_at TEXT, PRIMARY KEY (ticker, date));
+-- 2026-10-25 'missed calls': every US signal skipped/blocked by a filter (news gate, threshold, debounce, earnings
+-- pause, max chase, loss-streak breaker, ...), one row per (rule, trigger). US arm only; never an order.
+CREATE TABLE IF NOT EXISTS missed_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, ticker TEXT NOT NULL, direction TEXT, signal_ts TEXT,
+  signal_price REAL, live_price REAL, filter TEXT NOT NULL, reason TEXT, rule TEXT, trigger_type TEXT, trigger_id INTEGER,
+  UNIQUE (rule, trigger_type, trigger_id));
+CREATE INDEX IF NOT EXISTS missed_calls_ts ON missed_calls(ts);
 """
 
 # columns added after the first schema version (applied idempotently in connect())
 MIGRATIONS = {
-    "paper_trades": [("purpose", "TEXT"), ("parent_id", "INTEGER"), ("client_order_id", "TEXT"),
-                     ("filled_qty", "REAL"), ("filled_avg_price", "REAL"), ("exit_due", "TEXT"),
-                     ("closed_at", "TEXT"), ("mode", "TEXT"), ("notes", "TEXT"), ("updated_at", "TEXT")],
     "reddit_counts": [("source", "TEXT"), ("upvotes", "INTEGER"), ("rank", "INTEGER")],
     "media": [("novelty", "REAL"), ("lang", "TEXT")],
+    # 2026-10-25: why an entry closed: stop_loss | take_profit | time | flat | earnings | unknown (loss-streak breaker)
+    "paper_trades": [("purpose", "TEXT"), ("parent_id", "INTEGER"), ("client_order_id", "TEXT"),
+                     ("filled_qty", "REAL"), ("filled_avg_price", "REAL"), ("exit_due", "TEXT"),
+                     ("closed_at", "TEXT"), ("mode", "TEXT"), ("notes", "TEXT"), ("updated_at", "TEXT"),
+                     ("exit_reason", "TEXT")],
     # status NULL/'valid' = counts; 'invalid' = false positive, kept for audit but excluded from evaluation
     "swiss_observations": [("status", "TEXT"), ("excluded_reason", "TEXT"), ("excluded_at", "TEXT")],
 }
@@ -161,6 +170,28 @@ def connect(path=DB_PATH):
             if name not in have:
                 con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
     con.commit()
+    return con
+
+
+def log_missed(con, ticker, direction, filt, reason, ts=None, signal_ts=None, signal_price=None, live_price=None,
+               rule=None, trigger_type=None, trigger_id=None):
+    """Record a 'missed call' (a US signal a filter skipped/blocked). Idempotent per (rule, trigger_type, trigger_id).
+    Caller commits. Never raises (logging must not break trading)."""
+    try:
+        con.execute("""INSERT OR IGNORE INTO missed_calls(ts, ticker, direction, signal_ts, signal_price, live_price, filter,
+                       reason, rule, trigger_type, trigger_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (ts or iso(utcnow()), ticker, direction, signal_ts, signal_price, live_price, filt, reason, rule,
+                     trigger_type, trigger_id))
+        return True
+    except Exception as ex:
+        print(f"  [warn] missed-call log failed: {ex}")
+        return False
+
+
+def connect_ro(path=DB_PATH):
+    """Read-only connection (no schema/migration writes), e.g. for backtest.py."""
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
     return con
 
 

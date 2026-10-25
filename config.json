@@ -711,5 +711,29 @@
    "\\bstocks\\b"
   ],
   "_patterns_note": "generic_patterns: always rejected (market/sector recaps, movers lists). index_patterns: rejected unless the HEADLINE itself names the company (a teaser mention is not enough). Regexes, case-insensitive."
+ },
+ "risk": {
+  "_note": "Risk rules for the US arm, approved by Francesco 2026-10-25 (paper only; exits unchanged; Swiss arm stays observe-only). max_chase_atr: skip an entry when the live price is already more than this many ATR(14, 1h) past the signal price in the trade direction (0 = off). loss_streak_stops: after this many consecutive stop-loss exits in one US session only top-conviction setups trade until the next session (0 = off). Top conviction = news tier <= top_conviction_news_tier (SEC filings = tier 0) AND |composite| >= top_conviction_min_composite in the trade direction (composite trigger z, else latest composite within top_conviction_composite_lookback_min). log_missed_calls: write every skipped/blocked signal to missed_calls; missed_threshold_band: also log composite readings within this band below the 2.0 threshold (once per ticker per 2h).",
+  "max_chase_atr": 1.0,
+  "loss_streak_stops": 3,
+  "top_conviction_min_composite": 3.0,
+  "top_conviction_news_tier": 1,
+  "top_conviction_composite_lookback_min": 30,
+  "log_missed_calls": true,
+  "missed_threshold_band": 0.5
+ },
+ "backtest": {
+  "_note": "backtest.py: replays logged US triggers against Alpaca IEX historical bars with the CURRENT exits (stop 1.5x ATR, TP 2x stop distance, 60-min time exit, 0.5% risk). A backtest net of costs is REQUIRED before any live-trading discussion. partial_tp is a TEST-ONLY variant reported separately; it never changes live behaviour.",
+  "slippage_pct_per_side": 0.05,
+  "commission_per_share": 0.0,
+  "commission_min_per_order": 0.0,
+  "equity": 100000,
+  "entry_delay_min": 1,
+  "partial_tp": {
+   "fraction": 0.5,
+   "tp1_r": 1.0,
+   "runner_r": 3.0,
+   "runner_stop": "breakeven"
+  }
  }
 }

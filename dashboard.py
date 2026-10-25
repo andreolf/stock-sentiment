@@ -5,7 +5,7 @@ Usage: dashboard.py [--no-png] [--no-alpaca]
 Times are shown in Europe/Zurich (labelled). Run at the end of every routine run. Zero X calls.
 Sections: Alpaca paper equity & P/L, positions, recent orders, X budget today vs 150, per-ticker charts
 (X posts/hour, weighted sentiment per run, IEX price), volume spikes, signals + forward returns,
-paper_trades log, news headlines, Reddit mentions, upcoming earnings, and the 'Switzerland (observe-only)'
+paper_trades log, missed calls (signals skipped by a filter), news headlines, Reddit mentions, upcoming earnings, and the 'Switzerland (observe-only)'
 panel (SIX move vs US line, Swiss headlines, observe-only observations; never traded).
 """
 import argparse, html, json, os, shutil, subprocess, sys
@@ -267,6 +267,15 @@ def main():
     dec_rows = [[zt(r["ts"]), e(r["ticker"]), e(r["rule"]), e(r["trigger_type"]), e(r["direction"]),
                  f'<b>{e(r["action"])}</b>' if r["action"] == "trade" else e(r["action"]), e(r["reason"]), e(r["news_ref"])]
                 for r in con.execute("SELECT * FROM decisions ORDER BY id DESC LIMIT 25")]
+    missed_rows, missed_counts = [], ""
+    try:
+        missed_rows = [[zt(r["ts"]), e(r["ticker"]), e(r["direction"]), fnum(r["signal_price"]), fnum(r["live_price"]),
+                        f'<span class="pill">{e(r["filter"])}</span>', e((r["reason"] or "")[:140])]
+                       for r in con.execute("SELECT * FROM missed_calls ORDER BY ts DESC, id DESC LIMIT 20")]
+        missed_counts = " · ".join(f"{e(r[0])} {r[1]}" for r in con.execute(
+            "SELECT filter, COUNT(*) FROM missed_calls WHERE ts>=? GROUP BY filter ORDER BY 2 DESC", (since,)))
+    except Exception as ex:
+        print(f"  [warn] missed calls: {ex}")
     ev_rows = [[e(r["ticker"]), e(r["report_date"]), e(r["time_of_day"]), e(r["reaction_date"]),
                 f'{fnum(r["eps_actual"])} vs {fnum(r["eps_estimate"])}', f'<span class="{cls(r["surprise_pct"])}">{fnum(r["surprise_pct"], 1, True, True)}</span>',
                 f'<span class="{cls(r["gap_pct"])}">{fnum(r["gap_pct"], 2, True, True)}</span>', fnum(r["news_sent"], 2, sign=True),
@@ -351,6 +360,9 @@ a.credit{{padding:8px 2px}}
 <div class="mut" style="margin-bottom:8px">Buy-and-hold since paper start: {e(bh_txt)}. Rules: v2_news_momentum trades only with fresh novel news; v2_attention_fade = paper-only fade log; v1_follow_spike = retired rule (log); earnings_drift = days 1-3 when surprise, gap and news agree.</div>
 {table(["Rule","Action","Horizon","n","Days","Net mean","Hit","Random entry","Excess SPY","Excess QQQ"], eval_rows, "no evaluated decisions yet")}</section>
 <section class="card"><h2>Trading decisions (latest)</h2>{table(["Time","Ticker","Rule","Trigger","Dir","Action","Reason","News ref"], dec_rows, "no decisions yet")}</section>
+<section class="card"><h2>Missed calls (signals skipped by a filter)</h2>
+<div class="mut" style="margin-bottom:8px">Every US signal blocked by the news gate, threshold, debounce, earnings pause, max chase (live price &gt; 1 ATR past the signal), loss-streak breaker (3 stop-losses in a session → top-conviction only) and similar. Last 7 days: {missed_counts or "none"}.</div>
+{table(["Time","Ticker","Dir","Signal price","Live","Filter","Reason"], missed_rows, "no missed calls logged yet")}</section>
 <section class="grid2">
 <div class="card"><h2>Earnings events (surprise, gap, news agreement)</h2>{table(["Ticker","Report (ET)","When","Reaction","EPS act vs est","Surprise","Gap","News","Agree","Src","Notes"], ev_rows, "no recent reports")}</div>
 <div class="card"><h2>SEC filings (8-K items, Form 4)</h2>{table(["Filed","Ticker","Form","Items / insider","Doc"], sec_rows, "none: SEC currently blocks this box (HTTP 403); Benzinga covers filings")}</div>

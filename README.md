@@ -43,6 +43,12 @@ sentiment sets the direction, attention amplifies it.
 - Orders are Alpaca **paper** brackets: limit entry, stop = 1.5 × ATR(14) on 1h bars (0.4–4%), take-profit = 2 × stop.
   Risk 0.5% of equity per trade, caps 5% per trade and 20% total. Kill switch: `touch data/KILL`.
 - Every decision (traded or hypothetical) is evaluated net of 3 bps/side vs a random-entry null and SPY/QQQ (`evaluate.py`).
+- **Risk rules (2026-10-25, config `risk`)**: skip an entry if the price already ran > 1 × ATR past the signal price
+  (max chase); after 3 stop-losses in a row in one US session only top-conviction setups trade (tier-1 news and
+  |composite| ≥ 3.0) until the next session; every skipped signal is logged as a **missed call** (dashboard card).
+- **Backtest first** (`backtest.py`): replays logged triggers against Alpaca IEX bars with the current exits, net of
+  slippage (0.05%/side default) and commissions, plus a test-only partial take-profit + runner variant. A backtest net
+  of costs is required before any live-trading discussion.
 
 ## Architecture
 
@@ -69,6 +75,7 @@ export ALPACA_PAPER_SECRET_KEY=...
 .venv/bin/python collector.py start   # free 5-min loop (sources, composite, dashboard, publish)
 .venv/bin/python dashboard.py         # render dashboard/index.html + dashboard/latest.png
 .venv/bin/python paper_trader.py      # dry run by default; --live-paper places PAPER orders
+.venv/bin/python backtest.py          # replay logged triggers vs IEX bars, net of costs (market data only)
 .venv/bin/python -m unittest discover -s tests
 ./publish_dashboard.sh                # render, copy into docs/, commit + push only if changed
 ```

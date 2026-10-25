@@ -142,7 +142,7 @@ CON = db.connect()   # one shared connection: separate ones would deadlock on un
 def reset(con):
     con.rollback()
     for t in ("signals", "volume_spikes", "paper_trades", "decisions", "media", "news", "sec_filings", "earnings_events",
-              "decision_returns", "random_baseline", "earnings"):
+              "decision_returns", "random_baseline", "earnings", "missed_calls", "composite"):
         con.execute(f"DELETE FROM {t}")
     con.commit()
 
@@ -441,7 +441,12 @@ class TraderV2(unittest.TestCase):
                             reaction_date, gap_pct, news_sent, direction, agree) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                          ("TSLA", str(rx - timedelta(days=1)), "after-hours", 0.55, 0.45, 22.2, str(rx), 3.1, 0.3, "long", agree))
 
+    # pinned to a weekday: FakeClient.calendar only lists business days, so on a weekend "today" has no session
+    # index and these two tests failed every Saturday/Sunday (found 2026-10-25, a Sunday)
+    WEEKDAY = db.datetime(2026, 10, 21, 11, 0, tzinfo=db.ZoneInfo("America/New_York")).astimezone(db.timezone.utc)
+
     def test_earnings_pause_blocks_sentiment_trade(self):
+        self.now = self.WEEKDAY
         self._event(agree=0)
         self.spike("up"); self.news(); self.con.commit()
         fc = FakeClient(); self.run_t(fc)
@@ -449,6 +454,7 @@ class TraderV2(unittest.TestCase):
         self.assertIn("earnings_pause", self.con.execute("SELECT reason FROM decisions").fetchone()[0])
 
     def test_earnings_drift_trades_when_agree(self):
+        self.now = self.WEEKDAY
         self._event(agree=1, rx_offset_days=1)          # today = reaction day 2 -> no pause, drift allowed
         self.con.commit()
         et = db.ZoneInfo("America/New_York")

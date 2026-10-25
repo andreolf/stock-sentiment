@@ -33,6 +33,18 @@ EARNINGS HARD RULE: any open position (tracked or not) in a ticker with earnings
 Unfilled entries are cancelled after entry_timeout_min (10). Every run first reconciles open paper orders.
 Kill switch: data/KILL or trading_enabled=false -> no new entries (exits still managed).
 DRY RUN (default): reads Alpaca, places/cancels nothing and writes nothing.
+RISK RULES (config "risk", approved by Francesco 2026-10-25; exits unchanged):
+  max chase      skip the entry when the live price has already moved more than max_chase_atr (1.0) x ATR(14, 1h)
+                 past the trigger's signal price IN the trade direction (filter 'max_chase').
+  loss streak    after loss_streak_stops (3) consecutive stop-loss exits in the current US session (ET date), only
+                 top-conviction setups may trade for the rest of that session: news tier <= top_conviction_news_tier
+                 (1; SEC 8-K/Form 4 = tier 0 also counts) AND |composite| >= top_conviction_min_composite (3.0) in the
+                 trade direction (composite trigger's z, else the ticker's latest composite within
+                 top_conviction_composite_lookback_min = 30 min). Resets at the next session. Exit reasons come from the
+                 bracket legs (stop leg filled = stop_loss). Filter 'loss_streak'.
+  missed calls   every trigger a filter skips (news gate, earnings pause/cut-off, max chase, loss streak, market
+                 closed, kill switch, ...) is written to table missed_calls (ticker, time, direction, signal price,
+                 live price, filter, reason); composite.py adds threshold near-misses and debounced composites.
 OBSERVE-ONLY GUARD: symbols flagged observe_only (config swiss_observe: NVS, UBS, LOGI, ONON, ALC) are refused
 before any order call: triggers on them are dropped, try_trade logs nothing, place() raises ObserveOnlyRefused.
 """
@@ -52,6 +64,8 @@ DEFAULTS = {"trading_enabled": True, "max_trade_pct": 0.05, "max_total_pct": 0.2
             "news_novelty_min": 0.5, "news_min_tier": 2, "earnings_hold_until_et": "15:45",
             "earnings_entry_after_et": "10:00", "bracket": True,
             "earnings_flat_by_et": "15:40", "earnings_no_entry_after_et": "15:00"}
+RISK_DEFAULTS = {"max_chase_atr": 1.0, "loss_streak_stops": 3, "top_conviction_min_composite": 3.0,
+                 "top_conviction_news_tier": 1, "top_conviction_composite_lookback_min": 30, "log_missed_calls": True}
 
 
 # ---------- pure helpers (unit-tested) ----------
@@ -110,6 +124,45 @@ def exposure_of(positions, open_orders):
             rem = float(o.get("qty") or 0) - float(o.get("filled_qty") or 0)
             exp += rem * float(o["limit_price"])
     return exp
+
+
+def chase_atr(direction, signal_price, live_price, atr_value):
+    """How many ATRs the live price has already moved past the signal price IN the trade direction
+    (negative = moved against the trade). None when any input is missing."""
+    if not signal_price or not live_price or not atr_value or atr_value <= 0:
+        return None
+    sign = 1 if direction == "long" else -1
+    return (float(live_price) - float(signal_price)) * sign / float(atr_value)
+
+
+def exit_kind_from_order(o):
+    """Classify how a bracket entry ended from its nested legs: stop leg filled -> 'stop_loss', take-profit limit leg
+    filled -> 'take_profit', else 'unknown'."""
+    for leg in (o or {}).get("legs") or []:
+        if leg.get("status") == "filled" or float(leg.get("filled_qty") or 0) > 0:
+            t = (leg.get("type") or leg.get("order_type") or "").lower()
+            if "stop" in t:
+                return "stop_loss"
+            if t == "limit":
+                return "take_profit"
+    return "unknown"
+
+
+def session_breaker(reasons, n):
+    """reasons = exit_reason of this session's closed entries, oldest first. True once n consecutive 'stop_loss'
+    exits have occurred (the breaker then stays on for the rest of the session). 'unknown'/None neither count nor
+    reset; any other exit (take_profit, time, flat, earnings) resets the run."""
+    if not n or n <= 0:
+        return False
+    run = 0
+    for r in reasons:
+        if r == "stop_loss":
+            run += 1
+            if run >= n:
+                return True
+        elif r not in (None, "unknown"):
+            run = 0
+    return False
 
 
 class ObserveOnlyRefused(RuntimeError):
@@ -178,14 +231,51 @@ def next_exit_due(con, now=None):
     return best
 
 
+def classify_reason(rule, reason):
+    """Map a stored hypothetical decision reason to a missed-call filter name (for backfill)."""
+    r = (reason or "").lower()
+    for key, f in (("earnings_pause", "earnings_pause"), ("earnings after close", "earnings_cutoff"), ("max chase", "max_chase"),
+                   ("loss-streak", "loss_streak"), ("market closed", "market_closed"), ("kill switch", "kill_switch"),
+                   ("already have position", "position_held"), ("not shortable", "not_shortable"),
+                   ("no usable price", "no_price"), ("size 0", "size_cap")):
+        if key in r:
+            return f
+    return "news_gate" if rule == "v2_attention_fade" else "other"
+
+
+def backfill_missed(con):
+    """Write missed_calls rows for hypothetical v2/earnings decisions logged before the table existed (idempotent).
+    -> number of rows inserted."""
+    n = 0
+    for d in con.execute("""SELECT * FROM decisions WHERE action='hypothetical'
+                            AND rule IN ('v2_news_momentum','v2_attention_fade','earnings_drift') ORDER BY ts""").fetchall():
+        src = None
+        if d["trigger_type"] in ("sentiment_shock", "composite"):
+            src = con.execute("SELECT ts, price, direction FROM signals WHERE id=?", (d["trigger_id"],)).fetchone()
+        elif d["trigger_type"] == "volume_spike":
+            src = con.execute("""SELECT COALESCE(detected_at, ts) ts, price,
+                                 CASE direction WHEN 'up' THEN 'long' ELSE 'short' END direction FROM volume_spikes WHERE id=?""",
+                              (d["trigger_id"],)).fetchone()
+        direction = src["direction"] if src else (flip(d["direction"]) if d["rule"] == "v2_attention_fade" else d["direction"])
+        before = con.total_changes
+        db.log_missed(con, d["ticker"], direction, classify_reason(d["rule"], d["reason"]), d["reason"], ts=d["ts"],
+                      signal_ts=src["ts"] if src else None, signal_price=src["price"] if src else None,
+                      live_price=d["price"], rule=d["rule"], trigger_type=d["trigger_type"], trigger_id=d["trigger_id"])
+        n += con.total_changes - before
+    con.commit()
+    return n
+
+
 def flip(d):
     return "short" if d == "long" else "long"
 
 
 # ---------- trader ----------
 class Trader:
-    def __init__(self, client, con, cfg, live=False, now=None, flat_before_close=False, kill_path=None, core=None, blocked=None):
+    def __init__(self, client, con, cfg, live=False, now=None, flat_before_close=False, kill_path=None, core=None, blocked=None,
+                 risk=None):
         self.c, self.con, self.cfg, self.live = client, con, {**DEFAULTS, **cfg}, live
+        self.risk = {**RISK_DEFAULTS, **(db.load_config().get("risk", {}) if risk is None else risk)}
         self.now = now or db.utcnow()
         self.flat = flat_before_close
         self.kill = kill_path or os.path.join(db.HERE, "data", "KILL")
@@ -269,6 +359,9 @@ class Trader:
                        mode, notes, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (db.iso(self.now), sym, side, abs(qty), status, oid, entry["signal_id"] if entry else None, "exit",
                      entry["id"] if entry else None, "live-paper", reason, db.iso(self.now)))
+        if entry:
+            kind = "earnings" if reason.startswith("earnings") else "time" if reason == "time exit" else "flat"
+            self._write("UPDATE paper_trades SET exit_reason=? WHERE id=?", (kind, entry["id"]))
         return True
 
     def manage_exits(self, positions, clock):
@@ -285,8 +378,9 @@ class Trader:
                 handled.add(e["ticker"]); continue
             p = pos.get(e["ticker"])
             if p is None:
-                self.say(f"  {e['ticker']} entry #{e['id']} has no open position (bracket leg or exit filled) -> closed")
-                self._write("UPDATE paper_trades SET closed_at=? WHERE id=?", (db.iso(self.now), e["id"]))
+                kind = e["exit_reason"] or self.exit_kind(e)
+                self.say(f"  {e['ticker']} entry #{e['id']} has no open position (bracket leg or exit filled: {kind}) -> closed")
+                self._write("UPDATE paper_trades SET closed_at=?, exit_reason=? WHERE id=?", (db.iso(self.now), kind, e["id"]))
                 continue
             reason = None
             if e["ticker"].upper() in earn_flat:
@@ -309,6 +403,54 @@ class Trader:
                 self.say(f"  earnings flat due for untracked {sym} but market closed"); continue
             self._close(sym, p, "earnings after close today: flat before 15:45 ET (untracked position)")
 
+    def exit_kind(self, e):
+        if not e["alpaca_order_id"]:
+            return "unknown"
+        try:
+            return exit_kind_from_order(self.c.get_order(e["alpaca_order_id"]))
+        except Exception as ex:
+            self.say(f"  [warn] exit kind lookup #{e['id']}: {ex}")
+            return "unknown"
+
+    # ----- risk rules (2026-10-25) -----
+    def session_exit_reasons(self):
+        """exit_reason of entries closed in the current US session (ET date of self.now), oldest first."""
+        day = self.now.astimezone(ET).date()
+        rows = self.con.execute("""SELECT closed_at, exit_reason FROM paper_trades WHERE purpose='entry' AND closed_at IS NOT NULL
+                                   AND closed_at >= ? ORDER BY closed_at, id""", (db.iso(self.now - timedelta(hours=30)),)).fetchall()
+        return [r["exit_reason"] for r in rows if db.parse_ts(r["closed_at"]).astimezone(ET).date() == day]
+
+    def breaker_on(self):
+        return session_breaker(self.session_exit_reasons(), int(self.risk.get("loss_streak_stops") or 0))
+
+    def top_conviction(self, trig, direction, news):
+        """-> (ok, description). Top conviction = news tier <= top_conviction_news_tier AND |composite| >=
+        top_conviction_min_composite with the composite's sign matching the trade direction."""
+        need_tier, need_c = self.risk["top_conviction_news_tier"], self.risk["top_conviction_min_composite"]
+        tier = (news or {}).get("tier")
+        comp = None
+        if trig["type"] == "composite" and trig.get("row") is not None:
+            comp = trig["row"]["zscore"]
+        else:
+            lo = db.parse_ts(trig["ts"]) - timedelta(minutes=self.risk["top_conviction_composite_lookback_min"])
+            r = self.con.execute("""SELECT composite FROM composite WHERE ticker=? AND composite IS NOT NULL AND ts BETWEEN ? AND ?
+                                    ORDER BY ts DESC LIMIT 1""", (trig["ticker"], db.iso(lo), db.iso(self.now))).fetchone()
+            comp = r["composite"] if r else None
+        sign = 1 if direction == "long" else -1
+        ok_news = tier is not None and tier <= need_tier
+        ok_comp = comp is not None and comp * sign >= need_c
+        desc = (f"news tier {tier if tier is not None else 'none'} (need <= {need_tier}), composite "
+                f"{'n/a' if comp is None else f'{comp:+.2f}'} (need {'+' if sign > 0 else '-'}{need_c:g} or beyond)")
+        return ok_news and ok_comp, desc
+
+    def missed(self, trig, direction, filt, reason, live_price=None, rule=None):
+        """Log a skipped/blocked trigger to missed_calls (live-paper only, like every other DB write)."""
+        if not self.live or not self.risk.get("log_missed_calls", True):
+            return
+        db.log_missed(self.con, trig["ticker"], direction, filt, reason, ts=db.iso(self.now), signal_ts=trig.get("ts"),
+                      signal_price=trig.get("price"), live_price=live_price, rule=rule, trigger_type=trig["type"],
+                      trigger_id=trig["id"])
+
     # ----- 3) triggers -----
     def triggers(self):
         since, now = db.iso(self.now - timedelta(minutes=self.cfg["signal_max_age_min"])), db.iso(self.now)
@@ -316,11 +458,11 @@ class Trader:
         for s in self.con.execute("""SELECT * FROM signals WHERE type IN ('sentiment_shock','composite') AND variant='follow'
                                      AND ts BETWEEN ? AND ? ORDER BY ts""", (since, now)):
             out.append({"type": s["type"], "id": s["id"], "ticker": s["ticker"], "ts": s["ts"], "direction": s["direction"],
-                        "desc": f"{s['type']} z={s['zscore']:+.2f}", "row": s})
+                        "price": s["price"], "desc": f"{s['type']} z={s['zscore']:+.2f}", "row": s})
         for v in self.con.execute("""SELECT * FROM volume_spikes WHERE flagged=1 AND detected_at BETWEEN ? AND ?
                                      AND ts >= ? ORDER BY ts""", (since, now, db.iso(self.now - timedelta(hours=2)))):
             if v["ticker"] in self.core:
-                out.append({"type": "volume_spike", "id": v["id"], "ticker": v["ticker"], "ts": v["ts"],
+                out.append({"type": "volume_spike", "id": v["id"], "ticker": v["ticker"], "ts": v["ts"], "price": v["price"],
                             "direction": "long" if v["direction"] == "up" else "short",
                             "desc": f"{v['timeframe']} spike x{v['ratio']:.1f} {v['ret_pct']:+.2f}%", "row": v})
         return [t for t in out if t["ticker"].upper() not in self.blocked]   # observe-only names never trigger
@@ -367,33 +509,55 @@ class Trader:
         earn_cut = et_at(self.now, self.cfg["earnings_flat_by_et"])
         earn_no_entry = et_at(self.now, self.cfg.get("earnings_no_entry_after_et", "15:00"))
 
-        def try_trade(rule, trig, direction, news_ref, exit_due, note):
+        breaker = self.breaker_on()
+        if breaker:
+            self.say(f"  LOSS-STREAK BREAKER ON: {self.risk['loss_streak_stops']} consecutive stop-losses this session -> "
+                     f"top-conviction setups only until the next session")
+
+        def try_trade(rule, trig, direction, news_ref, exit_due, note, news=None):
             side = "buy" if direction == "long" else "sell"
-            why = None
+            why = filt = None
             if trig["ticker"].upper() in self.blocked:
                 self.say(f"  REFUSED {trig['ticker']}: observe_only symbol, no order, no decision row"); return
             if killed:
-                why = "kill switch / trading disabled"
+                why, filt = "kill switch / trading disabled", "kill_switch"
             elif not clock.get("is_open"):
-                why = "market closed"
+                why, filt = "market closed", "market_closed"
             elif trig["ticker"] in state["held"]:
-                why = "already have position/order in ticker"
+                why, filt = "already have position/order in ticker", "position_held"
             elif trig["ticker"].upper() in earn_today and self.now >= earn_no_entry:
-                why = "earnings after close today (no new entries after %s ET)" % self.cfg.get("earnings_no_entry_after_et", "15:00")
-            elif side == "sell" and not self.shortable(trig["ticker"]):
-                why = "not shortable / shorts disabled"
+                why, filt = ("earnings after close today (no new entries after %s ET)"
+                             % self.cfg.get("earnings_no_entry_after_et", "15:00")), "earnings_cutoff"
+            elif breaker:
+                ok, desc = self.top_conviction(trig, direction, news)
+                if not ok:
+                    why, filt = (f"loss-streak breaker ({self.risk['loss_streak_stops']} stop-losses in a row this session): "
+                                 f"top-conviction only; {desc}"), "loss_streak"
+            if not why and side == "sell" and not self.shortable(trig["ticker"]):
+                why, filt = "not shortable / shorts disabled", "not_shortable"
             lp = self.quote_limit(trig["ticker"], side) if not why else None
             if not why and not lp:
-                why = "no usable price"
+                why, filt = "no usable price", "no_price"
+            live = a = None
+            if not why:
+                k = self.cfg["limit_offset_bps"] / 10000
+                live = lp / (1 + k) if side == "buy" else lp / (1 - k)      # undo the limit offset -> mid/last
+                a = self.hourly_atr(trig["ticker"])
+                stop, tp, dist = bracket_levels(side, lp, a, self.cfg["atr_mult_stop"], self.cfg["tp_mult"],
+                                                self.cfg["min_stop_pct"], self.cfg["max_stop_pct"])
+                atr_eff = a if a else dist / self.cfg["atr_mult_stop"]
+                ch, mc = chase_atr(direction, trig.get("price"), live, atr_eff), self.risk.get("max_chase_atr")
+                if mc and ch is not None and ch > mc:
+                    why, filt = (f"max chase: live {live:.2f} is {ch:.2f} ATR past signal price {float(trig['price']):.2f} "
+                                 f"(limit {mc:g} ATR, ATR {atr_eff:.2f})"), "max_chase"
             if why:
-                self.decide(rule, trig, direction, "hypothetical", f"would trade but {why}", lp, news_ref); return
-            a = self.hourly_atr(trig["ticker"])
-            stop, tp, dist = bracket_levels(side, lp, a, self.cfg["atr_mult_stop"], self.cfg["tp_mult"],
-                                            self.cfg["min_stop_pct"], self.cfg["max_stop_pct"])
+                self.decide(rule, trig, direction, "hypothetical", f"would trade but {why}", lp, news_ref)
+                self.missed(trig, direction, filt, why, live, rule); return
             qty = size_qty(equity, state["exposure"], lp, self.cfg["max_trade_pct"], self.cfg["max_total_pct"],
                            dist, self.cfg["risk_per_trade_pct"])
             if qty < 1:
-                self.decide(rule, trig, direction, "hypothetical", "size 0 (exposure cap)", lp, news_ref); return
+                self.decide(rule, trig, direction, "hypothetical", "size 0 (exposure cap)", lp, news_ref)
+                self.missed(trig, direction, "size_cap", "size 0 (exposure cap)", live, rule); return
             if trig["ticker"].upper() in earn_today and (not exit_due or db.parse_ts(exit_due) > earn_cut):
                 exit_due = db.iso(earn_cut)                # never hold into tonight's report
                 note += "; exit_due capped (earnings after close)"
@@ -432,15 +596,18 @@ class Trader:
             if self.decided("v2_news_momentum", trig["type"], trig["id"]) or self.decided("v2_attention_fade", trig["type"], trig["id"]):
                 continue
             if eidx.get(t) == 1:
-                self.decide("v2_news_momentum", trig, d, "hypothetical", "earnings_pause (reaction session)"); continue
+                self.decide("v2_news_momentum", trig, d, "hypothetical", "earnings_pause (reaction session)")
+                self.missed(trig, d, "earnings_pause", "earnings_pause (reaction session)", rule="v2_news_momentum"); continue
             news = newsgate.hard_news(self.con, t, trig["ts"], d, self.cfg["news_window_min"], self.cfg["news_novelty_min"],
                                       self.cfg["news_min_tier"])
             if news:
                 ref = f"{news['kind']}:{news['ref']}"
                 try_trade("v2_news_momentum", trig, d, ref, db.iso(self.now + timedelta(minutes=self.cfg["hold_minutes"])),
-                          f"backed by {news['kind']} T{news['tier']} nov {news['novelty']:.2f}: {news['title'][:80]}")
+                          f"backed by {news['kind']} T{news['tier']} nov {news['novelty']:.2f}: {news['title'][:80]}", news)
             else:
                 self.decide("v2_attention_fade", trig, flip(d), "hypothetical", "attention-only, no fresh novel news -> fade (paper log only)")
+                self.missed(trig, d, "news_gate", "no fresh, novel tier-1/2 headline naming the company (attention-only)",
+                            rule="v2_attention_fade")
 
     def shortable(self, sym):
         if not self.cfg["allow_short"]:
@@ -504,7 +671,11 @@ def main():
     ap.add_argument("--flat-before-close", action="store_true")
     ap.add_argument("--exits-only", action="store_true", help="reconcile + exits only (no entries)")
     ap.add_argument("--now", help="override current time (ISO UTC), for testing")
+    ap.add_argument("--backfill-missed", action="store_true",
+                    help="write missed_calls rows for older hypothetical decisions (idempotent; no Alpaca calls) and exit")
     a = ap.parse_args()
+    if a.backfill_missed:
+        print(f"missed_calls backfill: {backfill_missed(db.connect())} rows added"); return 0
     lk = lock_file(os.path.join(db.HERE, "data", "paper_trader.lock"),
                                     wait=0 if a.exits_only else 120) if a.live_paper else True
     if lk is None:

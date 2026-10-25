@@ -66,6 +66,9 @@ $P paper_trader.py --live-paper          # add --flat-before-close on the last r
 #    (copies into docs/, commits + pushes only docs/ and only if changed; rate-limited to 15 min, PNG 6 h; never fails)
 ./publish_dashboard.sh
 
+# 5b. before ANY live-trading discussion (and after rule changes): backtest net of costs (no X, read-only DB)
+#    $P backtest.py --json data/backtest/$(date +%F).json
+
 # 6. once a day (e.g. first run): forward returns of signals and of every rule decision, random-entry null arm,
 #    SPY/QQQ buy-and-hold, 3 bps/side slippage
 $P evaluate.py
@@ -172,6 +175,49 @@ Evidence: vault note Research-2026-10-21-sentiment-trading-comparables.
   close today (no new entries after 15:00 ET)"). Other tickers are unaffected.
   Make sure `earnings.py fetch` has run today (the routine does it first) or the rule has no calendar to read.
 - One position per ticker; shorts only if shortable + easy to borrow. Kill switch: `touch data/KILL`.
+
+## Risk rules (approved by Francesco 2026-10-25; config `risk` + `backtest`; US arm only, paper only)
+Exits are UNCHANGED (stop 1.5 × ATR, take-profit 2 × stop distance, 60-min time exit, 0.5% risk). The Swiss arm stays
+observe-only (no triggers, no orders, no missed-call rows).
+1. **Backtest before any live-trading talk** (`backtest.py`): replays every logged US trigger (sentiment_shock/composite
+   follow signals + flagged core volume spikes; Swiss names excluded) against Alpaca IEX historical bars
+   (data.alpaca.markets, feed=iex, free; read-only DB, zero X calls, never the trading API) with the current exits and
+   sizing. Entry = open of the first 1-min bar ≥ T + 1 min (T = when paper_trader evaluated the trigger, else the trigger
+   time; `--entry-at trigger` forces trigger time), regular hours only, one position per ticker. Conservative fills: a bar
+   touching stop and target = stop; gaps fill at the open; time exit 60 min or 15 min before the close. Costs:
+   `backtest.slippage_pct_per_side` **0.05%** on every fill (both sides, incl. TP), `commission_per_share` **0**,
+   `commission_min_per_order` **0** (CLI: `--slippage-pct`, `--commission-per-share`, `--commission-min`). Reports: all
+   triggers, the subset traded live, all after the max-chase filter, and a **TEST-ONLY partial take-profit + runner**
+   variant (`backtest.partial_tp`: 50% at 1R, runner stop → breakeven from the next bar, runner target 3R, same time
+   exit). The partial variant exists only in backtest.py; live brackets are untouched.
+   `$P backtest.py [--verbose] [--json data/backtest/<date>.json]`. **A backtest net of costs is required before any
+   discussion of live trading**, and a handful of trades is not evidence.
+   First run 2026-10-25 (11 logged triggers, 6 simulated: 2 outside regular hours, 3 overlapping an open position; 0.05%/side,
+   no commission): all triggers 6 trades, win rate 33.3%, gross +$28.63, costs $28.98, **net −$0.34**; traded-live
+   subset 4 trades, 0 wins, gross −$14.43, **net −$33.61**; max chase skipped none; partial-TP variant identical (no
+   trade reached +1R; all 6 were time exits). With `--entry-at trigger`: 6 trades, net −$68.25 (1 stop-loss).
+2. **Max chase** (`risk.max_chase_atr` **1.0**, 0 = off): before an order, if the live price (IEX mid/last) is already more
+   than 1 × ATR(14, 1h) past the trigger's signal price IN the trade direction, the entry is skipped (hypothetical decision
+   "would trade but max chase …", missed call `max_chase`). ATR fallback when bars are missing = clamped stop distance ÷ 1.5.
+   Earnings-drift entries carry no signal price and are not chase-checked.
+3. **Loss-streak breaker** (`risk.loss_streak_stops` **3**, 0 = off): after 3 consecutive stop-loss exits in the current US
+   session (ET date), for the rest of that session only **top-conviction** setups trade: news tier ≤
+   `top_conviction_news_tier` **1** (tier-1 outlet; an SEC 8-K/insider-buy Form 4 = tier 0 also counts) AND |composite| ≥
+   `top_conviction_min_composite` **3.0** in the trade direction (a composite trigger's own z, otherwise the ticker's latest
+   composite within `top_conviction_composite_lookback_min` **30** min). Earnings-drift entries are not top-conviction.
+   Resets automatically at the next session. Exit reasons are stored in `paper_trades.exit_reason` (stop_loss /
+   take_profit from the bracket legs via `GET /orders/{id}?nested=true`; time / flat / earnings from our own closes;
+   `unknown` neither counts nor resets the streak; any other exit resets it). Missed call `loss_streak`.
+4. **Missed calls** (table `missed_calls`, `risk.log_missed_calls` **true**): every US signal a filter skipped/blocked is
+   logged once per (rule, trigger) with ticker, time, direction (the original signal direction, also for attention-fade),
+   signal time/price, live price (when known), filter and reason. Filters: `news_gate`, `earnings_pause`,
+   `earnings_cutoff`, `max_chase`, `loss_streak`, `market_closed`, `kill_switch`, `position_held`, `not_shortable`,
+   `no_price`, `size_cap` (paper_trader) and `threshold` (|composite| within `risk.missed_threshold_band` **0.5** below the
+   2.0 signal threshold) / `debounce` (|composite| > 2 inside the 2-h debounce) from composite.py, at most once per ticker
+   per filter per 2 h. Live-paper runs only (dry runs write nothing). Dashboard: "Missed calls" card (last 20 + 7-day counts
+   per filter). `paper_trader.py --backfill-missed` re-creates rows for older hypothetical decisions (idempotent; ran
+   2026-10-25: 6 rows). Migration: `db.connect()` adds the table and the column idempotently (backups
+   data/sentiment.db.bak-20261025-115324 before the schema change, -120026 before the backfill).
 
 ## Public repo + GitHub Pages (publish_dashboard.sh)
 - Repo https://github.com/andreolf/stock-sentiment is PUBLIC. `.gitignore` keeps out `.venv/`, `data/` (DB, backups,
@@ -303,6 +349,7 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
 
 ## Files
 - `publish_dashboard.sh` dashboard → docs/ → GitHub Pages; `README.md` public overview
+- `backtest.py` replay of logged triggers vs Alpaca IEX bars, current exits, costs, test-only partial-TP variant
 - `alpaca_client.py` paper-only REST client (CLI: account | positions | orders | clock | quote | bars)
 - `volume_alerts.py`, `paper_trader.py` (v2), `newsgate.py`, `news.py`, `media.py`, `finsent.py`, `reddit.py`,
   `earnings.py`, `edgar.py`, `composite.py`, `collector.py`, `dashboard.py`, `config.json`
@@ -314,12 +361,16 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
   ExitEnforcement (exits-only timing, short buy-back, earnings flat-by-15:40 incl. untracked, exit_due cap, 15:00 ET entry block, lock, collector order)
 - `budget.py` ledger (`check N` / `record N note [--force]` / `status [--days K]`), cap 150/day UTC+8
 - `db.py` schema + helpers; DB `data/sentiment.db` (posts, post_batches, scores, counts, runs, signals,
-  signal_returns, paper_trades). Env `STOCK_SENT_DB` / `STOCK_SENT_BUDGET` override paths (tests).
+  signal_returns, paper_trades, missed_calls). Env `STOCK_SENT_DB` / `STOCK_SENT_BUDGET` override paths (tests).
 - `ingest.py` (JSON shapes in its docstring: `.venv/bin/python ingest.py -h`), `score.py`, `signals.py`, `evaluate.py`
 - `swiss.py`, `swiss_news.py` Swiss observe-only arm (tables six_moves, six_open_tests, swiss_iex, swiss_observations,
   swiss_obs_returns, swiss_random, media_rejected, swiss_obs_skipped; feed status `data/swiss_feed_status.json`)
 - `tests/test_swiss.py` config, no-trade guarantee (trader + client), SIX math, headline rules, fake feeds (blocked feed
   skipped, dedupe, SER), observation rules, evaluation with slippage, X off, bad-quote guard, broker-action/holdings headlines
+- `tests/test_risk.py` 2026-10-25 risk rules: backtest fills/costs/time exit/partial-TP (test-only)/DB replay without
+  Swiss or trading calls, max chase (math, skip, short side, config off), loss-streak breaker (math, exit kinds from legs,
+  top-conviction pass/fail, session reset), missed calls (news gate, market closed, dry run, Swiss, composite
+  threshold/debounce, backfill, migration on an old DB, dashboard card + credits)
 - `tests/test_collector.py` heartbeat JSON/old format, single-instance lock, `ensure` stale-heartbeat restart / orphan adopt, loop survives exceptions
 - `tests/test_pipeline.py` synthetic end-to-end test (temp DB; signal fires, debounce, evaluate vs SPY)
 - `data/raw/YYYY-MM-DD/` raw X results · `data/scores/` agent score files
@@ -340,6 +391,8 @@ volume is compared with the same-ET-time bucket's mean over the prior 10 session
 - 2026-10-22: tests refuse to run if STOCK_SENT_DB resolves to the live data/sentiment.db (an import-order slip in a new
   test module let test_trader.reset() wipe news/media/signals/decisions/paper_trades/volume_spikes/earnings in the live DB;
   restored from the 2026-10-21 23:35 backup + Alpaca news backfill + RSS refetch + Alpaca paper order history + dashboard).
+- 2026-10-25: TraderV2 earnings pause/drift tests pinned to a weekday (they failed on weekends: the fake calendar has
+  no session for a Saturday/Sunday "today").
 - 2026-10-22: news gate source quality (media.classify / headline_style, newsgate.source_tier; config media.tier2_outlets,
   ugc_outlets, ugc_urls): social/community/UGC sources and '$NAME (TICKER.US)$'/cashtag/chatter headlines -> tier 4, unvetted
   Google News outlets -> tier 3; quote/listing pages ('Stock Price, News, Quote & History', 'Options Chain | Quotes & News')

@@ -120,8 +120,9 @@ class AlpacaPaper:
         return self._t("GET", "/orders", params={"status": status, "limit": limit, "nested": "true",
                                                   "symbols": ",".join(symbols) if symbols else None})
 
-    def get_order(self, order_id):
-        return self._t("GET", f"/orders/{order_id}")
+    def get_order(self, order_id, nested=True):
+        """nested=true also returns a bracket's legs (take-profit limit / stop-loss stop) with their fill status."""
+        return self._t("GET", f"/orders/{order_id}", params={"nested": "true"} if nested else None)
 
     def place_limit_order(self, symbol, qty, side, limit_price, tif="day", client_order_id=None, extended_hours=False):
         guard_symbol(symbol)
