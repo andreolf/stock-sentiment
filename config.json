@@ -48,7 +48,9 @@
   "earnings_hold_until_et": "15:45",
   "earnings_entry_after_et": "10:00",
   "earnings_universe": "watchlist",
-  "bracket": true
+  "bracket": true,
+  "attention_fade_trading": false,
+  "_attention_fade_note": "attention_fade_trading=false: v2_attention_fade stays a paper-log hypothetical. Set true ONLY after Francesco reviews the backtest (research/2026-11-17-attention-fade-backtest.md); then attention-only triggers trade the FADE with the same bracket/risk rules."
  },
  "reddit": {
   "subreddits": [
@@ -710,7 +712,14 @@
    "\\b(chip|tech|AI|bank|EV|growth|meme|crypto|semiconductor|megacap|mega-cap|magnificent seven) stocks\\b",
    "\\bstocks\\b"
   ],
-  "_patterns_note": "generic_patterns: always rejected (market/sector recaps, movers lists). index_patterns: rejected unless the HEADLINE itself names the company (a teaser mention is not enough). Regexes, case-insensitive."
+  "_patterns_note": "generic_patterns: always rejected (market/sector recaps, movers lists). index_patterns: rejected unless the HEADLINE itself names the company (a teaser mention is not enough). Regexes, case-insensitive.",
+  "max_age_min": 60,
+  "min_direction_sentiment": 0.1,
+  "allow_teaser_mention": false,
+  "analyst_tickers": [
+   "UBS"
+  ],
+  "_quality_note": "2026-11-17 (Francesco: 'sistema i filtri'): freshness = article publish time vs decision time (max_age_min); headline sentiment must point the trade direction (min_direction_sentiment, per company: the company must be the headline subject); opinion pieces, basket/stock lists, market wraps, analyst-as-subject (analyst_tickers) and other-company-subject headlines never qualify; neutral trial-result headlines are not negative. Patterns live in newsgate.DEFAULT_PATTERNS (override with <kind>_patterns); extra company names: other_companies."
  },
  "risk": {
   "_note": "Risk rules for the US arm, approved by Francesco 2026-10-25 (paper only; exits unchanged; Swiss arm stays observe-only). max_chase_atr: skip an entry when the live price is already more than this many ATR(14, 1h) past the signal price in the trade direction (0 = off). loss_streak_stops: after this many consecutive stop-loss exits in one US session only top-conviction setups trade until the next session (0 = off). Top conviction = news tier <= top_conviction_news_tier (SEC filings = tier 0) AND |composite| >= top_conviction_min_composite in the trade direction (composite trigger z, else latest composite within top_conviction_composite_lookback_min). log_missed_calls: write every skipped/blocked signal to missed_calls; missed_threshold_band: also log composite readings within this band below the 2.0 threshold (once per ticker per 2h).",
@@ -720,7 +729,10 @@
   "top_conviction_news_tier": 1,
   "top_conviction_composite_lookback_min": 30,
   "log_missed_calls": true,
-  "missed_threshold_band": 0.5
+  "missed_threshold_band": 0.5,
+  "no_entry_after_et": "15:30",
+  "opposite_cooldown": "session",
+  "_note_2026_11_17": "Approved by Francesco 2026-11-17: no new entries after no_entry_after_et (15:30 ET, any rule); opposite_cooldown='session': after a trade in a ticker, a trade in the OPPOSITE direction in the same ticker is blocked for the rest of the US session (Swiss arm: same for observations); earnings_drift never re-enters a ticker the same session after a stop-loss."
  },
  "backtest": {
   "_note": "backtest.py: replays logged US triggers against Alpaca IEX historical bars with the CURRENT exits (stop 1.5x ATR, TP 2x stop distance, 60-min time exit, 0.5% risk). A backtest net of costs is REQUIRED before any live-trading discussion. partial_tp is a TEST-ONLY variant reported separately; it never changes live behaviour.",
@@ -735,5 +747,10 @@
    "runner_r": 3.0,
    "runner_stop": "breakeven"
   }
+ },
+ "alpaca": {
+  "retries": 3,
+  "retry_backoff_s": 1.0,
+  "_note": "GET/clock/account/orders reads and order submits retry on timeouts/5xx/429 with exponential backoff (order POSTs reuse client_order_id so a retry cannot double-submit)."
  }
 }

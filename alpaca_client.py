@@ -6,9 +6,14 @@ Trading base is hardcoded to https://paper-api.alpaca.markets/v2; any request to
 (e.g. live api.alpaca.markets) raises PaperOnlyError before a socket is opened.
 Market data: https://data.alpaca.markets/v2 with feed=iex (free; IEX is a small slice of volume).
 
+Reliability (2026-11-17): transient failures (timeouts, connection errors, HTTP 429/5xx) are retried with exponential
+backoff (config alpaca.retries, default 3; alpaca.retry_backoff_s, default 1 s). Order submits are retried only when they
+carry a client_order_id; if a retry hits "client_order_id must be unique" the original order is fetched instead, so a
+timeout can never double-submit.
+
 CLI (read-only): alpaca_client.py account | positions | orders [status] | clock | quote SYM | bars SYM [5Min] [N]
 """
-import json, os, sys, urllib.error, urllib.parse, urllib.request
+import json, os, socket, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
 
 PAPER_TRADING = "https://paper-api.alpaca.markets/v2"
@@ -74,12 +79,20 @@ class AlpacaPaper:
         if not self._key or not self._secret:
             raise RuntimeError("ALPACA_PAPER_KEY_ID / ALPACA_PAPER_SECRET_KEY not set")
         self.timeout = timeout
+        try:
+            ac = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"))).get("alpaca") or {}
+        except Exception:
+            ac = {}
+        self.retries, self.backoff = int(ac.get("retries", 3)), float(ac.get("retry_backoff_s", 1.0))
 
     def __repr__(self):  # never leak keys
         return "AlpacaPaper(paper-api.alpaca.markets, keys=***)"
 
     # ---- transport ----
-    def _request(self, method, url, params=None, body=None):
+    def _sleep(self, sec):
+        time.sleep(sec)
+
+    def _request(self, method, url, params=None, body=None, retry=True):
         if params:
             url += ("&" if "?" in url else "?") + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         guard_url(url)
@@ -87,15 +100,44 @@ class AlpacaPaper:
         req = urllib.request.Request(url, data=data, method=method, headers={
             "APCA-API-KEY-ID": self._key, "APCA-API-SECRET-KEY": self._secret,
             "Content-Type": "application/json", "Accept": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                raw = r.read().decode()
-                return json.loads(raw) if raw.strip() else None
-        except urllib.error.HTTPError as e:
-            raise AlpacaError(e.code, e.read().decode(errors="replace")) from None
+        tries = 1 + (self.retries if retry else 0)
+        for i in range(tries):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    raw = r.read().decode()
+                    return json.loads(raw) if raw.strip() else None
+            except urllib.error.HTTPError as e:
+                err = AlpacaError(e.code, e.read().decode(errors="replace"))
+                if not (e.code == 429 or e.code >= 500) or i == tries - 1:
+                    raise err from None
+            except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as e:
+                if i == tries - 1:
+                    raise AlpacaError(0, f"network error after {tries} tries: {type(e).__name__}: {e}") from None
+            self._sleep(self.backoff * (2 ** i))
 
     def _t(self, method, path, **kw):
         return self._request(method, PAPER_TRADING + path, **kw)
+
+    def get_order_by_client_id(self, client_order_id):
+        return self._t("GET", "/orders:by_client_order_id", params={"client_order_id": client_order_id, "nested": "true"})
+
+    def _submit(self, body):
+        """POST /orders. Retried only with a client_order_id; a duplicate-id error after a retry means the first attempt
+        went through -> return that order."""
+        coid = body.get("client_order_id")
+        if not coid:
+            return self._t("POST", "/orders", body=body, retry=False)
+        try:
+            return self._t("POST", "/orders", body=body, retry=True)
+        except AlpacaError as e:
+            if e.status in (0, 422) or "client_order_id" in (e.body or ""):
+                try:
+                    o = self.get_order_by_client_id(coid)
+                    if o and o.get("id"):
+                        return o
+                except AlpacaError:
+                    pass
+            raise
 
     def _d(self, path, params=None):
         return self._request("GET", DATA + path, params=params)
@@ -135,7 +177,7 @@ class AlpacaPaper:
                 "limit_price": f"{float(limit_price):.2f}", "extended_hours": bool(extended_hours)}
         if client_order_id:
             body["client_order_id"] = client_order_id
-        return self._t("POST", "/orders", body=body)
+        return self._submit(body)
 
     def place_bracket_order(self, symbol, qty, side, limit_price, take_profit, stop_loss, tif="day", client_order_id=None):
         """Limit entry + server-side take-profit (limit) and stop-loss (stop) legs (order_class=bracket)."""
@@ -153,7 +195,7 @@ class AlpacaPaper:
                 "take_profit": {"limit_price": f"{tp:.2f}"}, "stop_loss": {"stop_price": f"{sl:.2f}"}}
         if client_order_id:
             body["client_order_id"] = client_order_id
-        return self._t("POST", "/orders", body=body)
+        return self._submit(body)
 
     def close_position(self, symbol, wait_steps=20):
         """Market-close a position (Alpaca DELETE /positions/{symbol}); cancel its open bracket legs first."""

@@ -45,6 +45,19 @@ RISK RULES (config "risk", approved by Francesco 2026-10-25; exits unchanged):
   missed calls   every trigger a filter skips (news gate, earnings pause/cut-off, max chase, loss streak, market
                  closed, kill switch, ...) is written to table missed_calls (ticker, time, direction, signal price,
                  live price, filter, reason); composite.py adds threshold near-misses and debounced composites.
+FILTER FIXES (approved by Francesco 2026-11-17, "sistema i filtri"):
+  late entry     no new entry (any rule) at/after risk.no_entry_after_et (15:30 ET). Filter 'late_entry'.
+  opposite dir   risk.opposite_cooldown = 'session': once a ticker traded in one direction this US session, a trade in
+                 the opposite direction is blocked until the next session (NVDA long/short flip-flop). Filter
+                 'opposite_cooldown'.
+  earnings_drift never re-enters a ticker in the same session after a stop-loss there. Filter 'reentry_after_stop'.
+  news gate      newsgate.hard_news(now_iso=decision time): publish-time freshness, per-company direction, headline
+                 quality (see newsgate.py).
+  fail-safe      a submit error is checked against Alpaca by client_order_id (a timed-out order that went through is
+                 recorded, never re-sent); every run checks each filled tracked entry still has a live protective leg
+                 (bracket stop / take-profit) and flattens a naked position ('fail-safe: no protective legs').
+  attention_fade paper_trader.attention_fade_trading (default false): when true, attention-only triggers trade the
+                 FADE with the same bracket/risk rules; while false they stay paper-log hypotheticals.
 OBSERVE-ONLY GUARD: symbols flagged observe_only (config swiss_observe: NVS, UBS, LOGI, ONON, ALC) are refused
 before any order call: triggers on them are dropped, try_trade logs nothing, place() raises ObserveOnlyRefused.
 """
@@ -63,9 +76,11 @@ DEFAULTS = {"trading_enabled": True, "max_trade_pct": 0.05, "max_total_pct": 0.2
             "atr_mult_stop": 1.5, "tp_mult": 2.0, "min_stop_pct": 0.4, "max_stop_pct": 4.0, "news_window_min": 60,
             "news_novelty_min": 0.5, "news_min_tier": 2, "earnings_hold_until_et": "15:45",
             "earnings_entry_after_et": "10:00", "bracket": True,
-            "earnings_flat_by_et": "15:40", "earnings_no_entry_after_et": "15:00"}
+            "earnings_flat_by_et": "15:40", "earnings_no_entry_after_et": "15:00", "attention_fade_trading": False}
 RISK_DEFAULTS = {"max_chase_atr": 1.0, "loss_streak_stops": 3, "top_conviction_min_composite": 3.0,
-                 "top_conviction_news_tier": 1, "top_conviction_composite_lookback_min": 30, "log_missed_calls": True}
+                 "top_conviction_news_tier": 1, "top_conviction_composite_lookback_min": 30, "log_missed_calls": True,
+                 "no_entry_after_et": "15:30", "opposite_cooldown": "session"}
+LIVE_LEG = {"new", "accepted", "pending_new", "held", "partially_filled", "accepted_for_bidding", "calculated", "pending_replace"}
 
 
 # ---------- pure helpers (unit-tested) ----------
@@ -162,6 +177,36 @@ def session_breaker(reasons, n):
                 return True
         elif r not in (None, "unknown"):
             run = 0
+    return False
+
+
+def has_live_protection(o):
+    """True if a (nested) bracket entry order still has a live protective leg, or a leg already filled (then the
+    position is closing/closed). False when the legs are all dead (cancelled/expired/rejected) or missing."""
+    legs = (o or {}).get("legs") or []
+    if not legs:
+        return False
+    return any(l.get("status") in LIVE_LEG or l.get("status") == "filled" for l in legs)
+
+
+def opposite_traded(con, ticker, direction, now):
+    """Earliest trade decision today (ET session date of `now`) in `ticker` with the OPPOSITE direction, or None."""
+    day = now.astimezone(ET).date()
+    opp = "short" if direction == "long" else "long"
+    for r in con.execute("""SELECT ts, rule FROM decisions WHERE ticker=? AND action='trade' AND direction=? AND ts >= ?
+                            ORDER BY ts""", (ticker, opp, db.iso(now - timedelta(hours=30)))):
+        if db.parse_ts(r["ts"]).astimezone(ET).date() == day:
+            return r
+    return None
+
+
+def stopped_today(con, ticker, now):
+    """True if an entry in `ticker` closed by its stop-loss earlier in this US session."""
+    day = now.astimezone(ET).date()
+    for r in con.execute("""SELECT ts FROM paper_trades WHERE ticker=? AND purpose='entry' AND exit_reason='stop_loss'
+                            AND ts >= ?""", (ticker, db.iso(now - timedelta(hours=30)))):
+        if db.parse_ts(r["ts"]).astimezone(ET).date() == day:
+            return True
     return False
 
 
@@ -360,7 +405,8 @@ class Trader:
                     (db.iso(self.now), sym, side, abs(qty), status, oid, entry["signal_id"] if entry else None, "exit",
                      entry["id"] if entry else None, "live-paper", reason, db.iso(self.now)))
         if entry:
-            kind = "earnings" if reason.startswith("earnings") else "time" if reason == "time exit" else "flat"
+            kind = ("earnings" if reason.startswith("earnings") else "time" if reason == "time exit"
+                    else "failsafe" if reason.startswith("fail-safe") else "flat")
             self._write("UPDATE paper_trades SET exit_reason=? WHERE id=?", (kind, entry["id"]))
         return True
 
@@ -389,6 +435,8 @@ class Trader:
                 reason = "time exit"
             elif self.flat and mins_to_close is not None and mins_to_close <= self.cfg["flat_before_close_min"]:
                 reason = "flat before close"
+            elif self.cfg.get("bracket", True) and e["alpaca_order_id"] and not self.protected(e):
+                reason = "fail-safe: no protective legs (naked position)"
             if not reason:
                 continue
             handled.add(e["ticker"])
@@ -402,6 +450,20 @@ class Trader:
             if not clock.get("is_open"):
                 self.say(f"  earnings flat due for untracked {sym} but market closed"); continue
             self._close(sym, p, "earnings after close today: flat before 15:45 ET (untracked position)")
+
+    def protected(self, e):
+        """Bracket legs still live for a filled entry? Unknown (lookup error) counts as protected (no blind flatten)."""
+        try:
+            o = self.c.get_order(e["alpaca_order_id"])
+        except Exception as ex:
+            self.say(f"  [warn] protection check #{e['id']}: {ex}")
+            return True
+        if (o or {}).get("status") in OPEN and float((o or {}).get("filled_qty") or 0) == 0:
+            return True
+        ok = has_live_protection(o)
+        if not ok:
+            self.say(f"  FAIL-SAFE {e['ticker']} #{e['id']}: filled entry has no live stop/take-profit leg")
+        return ok
 
     def exit_kind(self, e):
         if not e["alpaca_order_id"]:
@@ -508,6 +570,7 @@ class Trader:
         earn_today = after_close_earnings_today(self.con, self.now)
         earn_cut = et_at(self.now, self.cfg["earnings_flat_by_et"])
         earn_no_entry = et_at(self.now, self.cfg.get("earnings_no_entry_after_et", "15:00"))
+        late = et_at(self.now, self.risk["no_entry_after_et"]) if self.risk.get("no_entry_after_et") else None
 
         breaker = self.breaker_on()
         if breaker:
@@ -525,9 +588,17 @@ class Trader:
                 why, filt = "market closed", "market_closed"
             elif trig["ticker"] in state["held"]:
                 why, filt = "already have position/order in ticker", "position_held"
+            elif self.risk.get("opposite_cooldown") and opposite_traded(self.con, trig["ticker"], direction, self.now):
+                o = opposite_traded(self.con, trig["ticker"], direction, self.now)
+                why, filt = (f"opposite-direction cooldown: {trig['ticker']} already traded {flip(direction)} this session "
+                             f"({db.local(o['ts'])}, {o['rule']})"), "opposite_cooldown"
+            elif rule == "earnings_drift" and stopped_today(self.con, trig["ticker"], self.now):
+                why, filt = "earnings_drift: stopped out in this ticker earlier this session (no re-entry)", "reentry_after_stop"
             elif trig["ticker"].upper() in earn_today and self.now >= earn_no_entry:
                 why, filt = ("earnings after close today (no new entries after %s ET)"
                              % self.cfg.get("earnings_no_entry_after_et", "15:00")), "earnings_cutoff"
+            elif late is not None and self.now >= late:
+                why, filt = f"no new entries after {self.risk['no_entry_after_et']} ET", "late_entry"
             elif breaker:
                 ok, desc = self.top_conviction(trig, direction, news)
                 if not ok:
@@ -599,11 +670,15 @@ class Trader:
                 self.decide("v2_news_momentum", trig, d, "hypothetical", "earnings_pause (reaction session)")
                 self.missed(trig, d, "earnings_pause", "earnings_pause (reaction session)", rule="v2_news_momentum"); continue
             news = newsgate.hard_news(self.con, t, trig["ts"], d, self.cfg["news_window_min"], self.cfg["news_novelty_min"],
-                                      self.cfg["news_min_tier"])
+                                      self.cfg["news_min_tier"], now_iso=db.iso(self.now))
             if news:
                 ref = f"{news['kind']}:{news['ref']}"
                 try_trade("v2_news_momentum", trig, d, ref, db.iso(self.now + timedelta(minutes=self.cfg["hold_minutes"])),
                           f"backed by {news['kind']} T{news['tier']} nov {news['novelty']:.2f}: {news['title'][:80]}", news)
+            elif self.cfg.get("attention_fade_trading"):
+                try_trade("v2_attention_fade", trig, flip(d), None,
+                          db.iso(self.now + timedelta(minutes=self.cfg["hold_minutes"])),
+                          f"attention-only ({trig['desc']}), no fresh novel news -> fade")
             else:
                 self.decide("v2_attention_fade", trig, flip(d), "hypothetical", "attention-only, no fresh novel news -> fade (paper log only)")
                 self.missed(trig, d, "news_gate", "no fresh, novel tier-1/2 headline naming the company (attention-only)",
@@ -627,9 +702,20 @@ class Trader:
             try:
                 o = self.c.place_bracket_order(sym, qty, side, lp, tp, stop, client_order_id=coid)
                 oid, status = o.get("id"), o.get("status")
-            except (AlpacaError, ValueError) as e:
+            except ValueError as e:
                 self.say(f"  ORDER FAILED {sym}: {e}")
                 return False
+            except AlpacaError as e:
+                o = None
+                try:
+                    o = self.c.get_order_by_client_id(coid)
+                except Exception:
+                    pass
+                if not (o and o.get("id")):
+                    self.say(f"  ORDER FAILED {sym}: {e} (not on Alpaca: nothing to clean up)")
+                    return False
+                self.say(f"  ORDER submit error {sym}: {e}; order exists on Alpaca -> recorded (no resubmit)")
+                oid, status = o.get("id"), o.get("status")
         self.say("  " + msg + (f" -> {status} {oid}" if self.live else ""))
         cur = self._write("""INSERT INTO paper_trades(ts, ticker, side, qty, limit_price, status, alpaca_order_id, signal_id,
                        purpose, client_order_id, exit_due, mode, notes, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",

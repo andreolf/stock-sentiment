@@ -46,6 +46,14 @@ sentiment sets the direction, attention amplifies it.
 - **Risk rules (2026-10-25, config `risk`)**: skip an entry if the price already ran > 1 × ATR past the signal price
   (max chase); after 3 stop-losses in a row in one US session only top-conviction setups trade (tier-1 news and
   |composite| ≥ 3.0) until the next session; every skipped signal is logged as a **missed call** (dashboard card).
+- **Filter fixes (2026-11-17)**: freshness is measured by the article's publish time at decision time; the headline
+  must name the company as its subject and its sentiment must point the trade's way; opinion pieces, basket/stock lists,
+  market wraps, analyst-as-subject (e.g. UBS as the rating bank) and other-company headlines never count; neutral
+  trial-result headlines are not negative. No new entries after 15:30 ET; no opposite-direction trade in a ticker in the
+  same session (Swiss observations too); earnings_drift never re-enters after a stop the same day; Alpaca calls retry with
+  backoff and a naked position (bracket legs dead) is flattened. `earnings.py reconcile` removes duplicate report rows.
+- **attention_fade backtest** (`backtest_fade.py`, results in `research/2026-11-17-attention-fade-backtest.md`): the fade
+  loses under live rules; it stays a hypothetical behind `paper_trader.attention_fade_trading = false`.
 - **Backtest first** (`backtest.py`): replays logged triggers against Alpaca IEX bars with the current exits, net of
   slippage (0.05%/side default) and commissions, plus a test-only partial take-profit + runner variant. A backtest net
   of costs is required before any live-trading discussion.

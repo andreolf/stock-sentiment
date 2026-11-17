@@ -3,6 +3,7 @@
 
 Usage: earnings.py fetch [--days 21] [--force]  |  earnings.py today  |  earnings.py show
        earnings.py events            compute/refresh earnings_events for reports in the last 5 days (surprise, gap, news)
+       earnings.py reconcile [--dry-run]  collapse duplicate listings of the same report (see below)
        earnings.py set-actual TICKER EPS [--date YYYY-MM-DD] [--estimate X]   manual override (agent read the release)
 * Primary: Nasdaq public calendar API (api.nasdaq.com/api/calendar/earnings?date=YYYY-MM-DD), one request
   per weekday from 3 days back to --days ahead (~18 requests), at most once per box day unless --force.
@@ -19,6 +20,11 @@ Usage: earnings.py fetch [--days 21] [--force]  |  earnings.py today  |  earning
     - agree = 1 when sign(surprise) == sign(gap) == sign(news) with |surprise| >= 2%, |gap| >= 1%, |news| >= 0.05.
   paper_trader.py trades `earnings_drift` on reaction days 1-3 only when agree = 1 (gap must be the real open,
   not indicative), and pauses other sentiment trades for that ticker on reaction day 1.
+* reconcile (2026-11-17): the calendar held each report twice (Nasdaq date D + a yfinance/Nasdaq row on D+1, e.g. NVDA
+  2026-11-17 after-hours + 2026-11-18 'not-supplied'), which produced two earnings_events with different reaction days
+  (META/MSTR earnings_drift traded the same ticker twice in one session). Rows of one ticker within 3 calendar days are
+  one report: keep Nasdaq over yfinance, a known time of day over unknown, then the earliest date; the other rows are
+  deleted from `earnings` and `earnings_events`. Runs after every fetch and before every `events`.
 * `today` prints watchlist tickers reporting today or the next US session (ET), used to tag signals and
   spikes as scheduled-event noise.
 """
@@ -61,8 +67,47 @@ def sgn(x, th):
     return 0 if x is None or abs(x) < th else (1 if x > 0 else -1)
 
 
+def canonical_reports(rows):
+    """rows: dicts/Rows with ticker, date, time_of_day, source. -> (keep, drop) lists of (ticker, date)."""
+    by = {}
+    for r in rows:
+        by.setdefault(r["ticker"], []).append(r)
+    keep, drop = [], []
+    for t, rs in by.items():
+        rs = sorted(rs, key=lambda r: r["date"])
+        clusters, cur = [], []
+        for r in rs:
+            if cur and (date.fromisoformat(r["date"]) - date.fromisoformat(cur[-1]["date"])).days > 3:
+                clusters.append(cur); cur = []
+            cur.append(r)
+        if cur:
+            clusters.append(cur)
+        for c in clusters:
+            def score(r):
+                tod = (r["time_of_day"] or "").lower()
+                known = any(k in tod for k in ("pre", "before", "after", "bmo", "amc"))
+                return (r["source"] == "nasdaq", known, -date.fromisoformat(r["date"]).toordinal())
+            best = max(c, key=score)
+            keep.append((t, best["date"]))
+            drop += [(t, r["date"]) for r in c if r is not best]
+    return keep, drop
+
+
+def reconcile(con, dry_run=False):
+    """Delete duplicate listings of the same report from earnings / earnings_events. -> list of dropped (ticker, date)."""
+    rows = con.execute("SELECT ticker, date, time_of_day, source FROM earnings").fetchall()
+    _, drop = canonical_reports(rows)
+    if not dry_run:
+        for t, d in drop:
+            con.execute("DELETE FROM earnings WHERE ticker=? AND date=?", (t, d))
+            con.execute("DELETE FROM earnings_events WHERE ticker=? AND report_date=?", (t, d))
+        con.commit()
+    return drop
+
+
 def compute_events(con, now):
     import media
+    reconcile(con)
     today = datetime.now(ET).date()
     tdays = trading_days(today - timedelta(days=12), today + timedelta(days=10))
     rows = con.execute("SELECT * FROM earnings WHERE date BETWEEN ? AND ?", (str(today - timedelta(days=5)), str(today))).fetchall()
@@ -144,7 +189,8 @@ def upcoming(con, days_ahead=1):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["fetch", "today", "show", "events", "set-actual"])
+    ap.add_argument("cmd", choices=["fetch", "today", "show", "events", "set-actual", "reconcile"])
+    ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("args", nargs="*")
     ap.add_argument("--date")
     ap.add_argument("--estimate", type=float)
@@ -159,6 +205,11 @@ def main():
         for t, rdate, tod, rx, act, est, sur, gap, ns, agree, notes in compute_events(con, now):
             print(f"  {t:5} report {rdate} {tod or '?':11} reaction {rx} | EPS {act} vs {est} surprise {f(sur, 1)}% | "
                   f"gap {f(gap)}% | news {f(ns)} | agree={agree}" + (f" ({'; '.join(notes)})" if notes else ""))
+        return 0
+    if a.cmd == "reconcile":
+        drop = reconcile(con, dry_run=a.dry_run)
+        print(f"earnings reconcile{' (dry run)' if a.dry_run else ''}: {len(drop)} duplicate rows "
+              f"{'would be ' if a.dry_run else ''}removed: {drop}")
         return 0
     if a.cmd == "set-actual":
         t, eps = a.args[0].upper(), float(a.args[1])
@@ -208,7 +259,9 @@ def main():
                 except Exception as e:
                     print(f"  [warn] yfinance {t}: {e}")
         con.commit()
-        print(f"earnings: nasdaq found {sorted(found)}; yfinance fallback for {missing}")
+        dropped = reconcile(con)
+        print(f"earnings: nasdaq found {sorted(found)}; yfinance fallback for {missing}"
+              + (f"; reconciled duplicates {dropped}" if dropped else ""))
     rows = upcoming(con, 1) if a.cmd == "today" else con.execute(
         "SELECT * FROM earnings WHERE date >= ? ORDER BY date", (str(datetime.now(ET).date() - timedelta(days=3)),)).fetchall()
     for r in rows:

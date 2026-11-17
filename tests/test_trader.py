@@ -213,12 +213,16 @@ class NewsGateCompanyFocus(unittest.TestCase):
         self.assertTrue(newsgate.about_company("TSLA", "SpaceX, Tesla Lift All Boats: Chip Stocks Claw Back $274 Billion")[0])
 
     def test_genuine_headlines_pass(self):
-        self.add_bz("n1", "NVDA", "Amkor Secures $1.3 Billion NVIDIA Deal To Expand AI Packaging", "", "AMKR,NVDA")
-        self.assertEqual(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "long")["ref"], "n1")
-        self.add_bz("n2", "TSLA", "Elon Musk's Tesla-SpaceX Mega-Merger Could Create 'Most Unique Company'", "", "SPCX,TSLA")
+        # 2026-11-17: another company as the headline subject no longer backs a trade (names NVIDIA, but is Amkor news)
+        self.add_bz("n1", "NVDA", "Amkor Secures $1.3 Billion NVIDIA Deal To Expand AI Packaging", "", "AMKR,NVDA", s=0.6)
+        self.assertIsNone(newsgate.hard_news(self.con, "NVDA", db.iso(self.now), "long"))
+        self.add_bz("n2", "TSLA", "Elon Musk's Tesla-SpaceX Mega-Merger Could Create 'Most Unique Company'", "", "SPCX,TSLA", s=0.5)
         self.assertEqual(newsgate.hard_news(self.con, "TSLA", db.iso(self.now), "long")["ref"], "n2")
-        self.add_bz("n3", "PLTR", "Watching $PLTR; Hearing SwingTrader Buys Stock", "", "PLTR")
-        self.assertEqual(newsgate.hard_news(self.con, "PLTR", db.iso(self.now), "long")["ref"], "n3")
+        # 2026-11-17: chatter/rumour relays ('Watching ...; Hearing ...') are unverified commentary, not news
+        self.add_bz("n3", "PLTR", "Watching $PLTR; Hearing SwingTrader Buys Stock", "", "PLTR", s=0.3)
+        self.assertIsNone(newsgate.hard_news(self.con, "PLTR", db.iso(self.now), "long"))
+        self.add_bz("n4", "PLTR", "Palantir Wins $480 Million Army Contract", "", "PLTR", s=0.6)
+        self.assertEqual(newsgate.hard_news(self.con, "PLTR", db.iso(self.now), "long")["ref"], "n4")
         ok = newsgate.about_company
         self.assertTrue(ok("META", "Facebook parent faces EU fine over ad targeting")[0])
         self.assertTrue(ok("META", "Meta's Zuckerberg unveils new glasses")[0])
@@ -330,7 +334,13 @@ class FakeClient:
     def calendar(self, a, b):
         import pandas as pd
         return [{"date": str(d.date())} for d in pd.bdate_range(a, b)]
-    def get_order(self, oid): return self.orders_by_id[oid]
+    def get_order(self, oid):
+        o = self.orders_by_id[oid]
+        if "legs" not in o and o.get("type") != "market":     # Alpaca nests a bracket's live legs (tp limit new, stop held)
+            o = {**o, "legs": [{"type": "limit", "status": "new"}, {"type": "stop", "status": "held"}]}
+        return o
+    def get_order_by_client_id(self, coid):
+        return next((o for o in self.orders_by_id.values() if o.get("client_order_id") == coid), None)
     def cancel_order(self, oid): self.cancelled.append(oid)
     def close_position(self, sym):
         self.closed.append(sym); self._pos = [p for p in self._pos if p["symbol"] != sym]
@@ -345,10 +355,17 @@ class FakeClient:
         self.orders_by_id[oid] = o; self.placed.append(o); return o
 
 
+def session_now():
+    """Today 11:00 ET (UTC): trading-rule tests must not depend on the wall clock (no entries after 15:30 ET since
+    2026-11-17)."""
+    et = db.ZoneInfo("America/New_York")
+    return db.datetime.now(et).replace(hour=11, minute=0, second=0, microsecond=0).astimezone(db.timezone.utc)
+
+
 class TraderV2(unittest.TestCase):
     def setUp(self):
         self.con = CON; reset(self.con)
-        self.now = db.utcnow().replace(microsecond=0)
+        self.now = session_now()
 
     def spike(self, direction="up", ticker="TSLA"):
         self.con.execute("""INSERT INTO volume_spikes(ts,ticker,timeframe,detected_at,ratio,ret_pct,direction,flagged)

@@ -35,6 +35,11 @@ Observation rules (all hypothetical, swiss_observations.observe_only = 1):
   swiss_composite   S = mean(z media sentiment 6h [/0.15], z SIX move [six_chg/1%]); A = z IEX volume [log ratio/0.5];
                     composite.py formula (S + sign(S)*A/2)/sqrt(1.25); |c| > 2 -> sign(c). Needs headline sentiment
                     (a SIX move alone is the six_move_gap rule). Debounce 2 h.
+Filter fixes (2026-11-17, approved by Francesco): swiss_news headlines go through newsgate.headline_issue() (opinion,
+  basket, market wrap, UBS as analyst/conference host/holder, another company as subject) and newsgate.adjust_sentiment()
+  (neutral trial-result headlines are not negative); spikes use the publish-time freshness of newsgate.hard_news(now_iso).
+  Opposite-direction cooldown: once a ticker has a valid observation in one direction in the current US session (ET date),
+  an observation in the opposite direction is NOT logged (swiss_obs_skipped, skip_reason 'opposite-direction cooldown').
 Bad-quote guard (US open, entry = IEX now; config swiss_observe.quote_guard): spread (ask-bid)/mid > 1% or mid more than
   2% from the fresh last IEX trade / latest 1-min bar close (4% vs prev close when neither is fresh) -> the observation
   is NOT logged; the skip goes to table swiss_obs_skipped + 'SWISS-OBS-SKIP' in the collector log. When the quote is
@@ -302,10 +307,36 @@ def iex_mid(t, so=None):
 
 
 # ---------------- observations ----------------
+def skip_obs(con, now, t, rule, ttype, ref, direction, reason, skip_reason):
+    con.execute("""INSERT INTO swiss_obs_skipped(ts, ticker, rule, trigger_type, trigger_ref, direction, reason, skip_reason)
+                   VALUES (?,?,?,?,?,?,?,?)""", (db.iso(now), t, rule, ttype, str(ref), direction, reason, skip_reason))
+    print(f"SWISS-OBS-SKIP (observe-only) {rule} {t} {direction}: {skip_reason} | {(reason or '')[:80]}")
+
+
+def opposite_obs_today(con, t, direction, now):
+    """A valid observation in `t` with the opposite direction in the current US session (ET date of now), or None."""
+    day = now.astimezone(ET).date()
+    opp = "short" if direction == "long" else "long"
+    for r in con.execute("""SELECT id, ts FROM swiss_observations WHERE ticker=? AND direction=? AND ts >= ?
+                            AND COALESCE(status,'valid')<>'invalid' ORDER BY ts""", (t, opp, db.iso(now - timedelta(hours=30)))):
+        if db.parse_ts(r["ts"]).astimezone(ET).date() == day:
+            return r
+    return None
+
+
 def log_obs(con, now, t, so, rule, ttype, ref, direction, reason, news_ref=None, event_ts=None, price_fn=iex_mid, extra=None):
     if con.execute("SELECT 1 FROM swiss_observations WHERE rule=? AND trigger_type=? AND trigger_ref=?",
                    (rule, ttype, str(ref))).fetchone():
         return None
+    if so.get("opposite_cooldown", "session"):
+        o = opposite_obs_today(con, t, direction, now)
+        if o:
+            if not con.execute("SELECT 1 FROM swiss_obs_skipped WHERE rule=? AND trigger_type=? AND trigger_ref=?",
+                               (rule, ttype, str(ref))).fetchone():
+                skip_obs(con, now, t, rule, ttype, ref, direction, reason,
+                         f"opposite-direction cooldown (obs #{o['id']} {db.local(o['ts'])} this session)")
+                con.commit()
+            return None
     if us_regular_open(now):
         basis, ets, px = "iex_mid_now", db.iso(now), price_fn(t)
         if isinstance(px, dict):   # guarded entry (quote_guard): skip, do not log, on a bad quote
@@ -393,6 +424,13 @@ def observe(con, so, now, new_news=(), new_spikes=(), six_rows=(), price_fn=iex_
     deb = timedelta(minutes=so.get("news_debounce_min", 60))
     for r in ([] if backfill else new_news):
         s, nov = r.get("sentiment"), r.get("novelty") or 0
+        if not str(r.get("kind") or "").startswith("ser_"):
+            s = newsgate.adjust_sentiment(r.get("title"), s)
+            iss = newsgate.headline_issue(r["ticker"], r.get("title") or "", r.get("url"))
+            if iss and s is not None and abs(s) >= so.get("news_min_abs_sentiment", 0.2):
+                skip_obs(con, now, r["ticker"], "swiss_news", r.get("kind"), r.get("id"), "long" if s > 0 else "short",
+                         f"{r.get('feed')}: {(r.get('title') or '')[:90]}", f"headline filter: {iss}")
+                continue
         if s is None or abs(s) < so.get("news_min_abs_sentiment", 0.2) or nov < so.get("news_novelty_min", 0.5):
             continue
         if r.get("kind") == "ser_sig":
@@ -410,7 +448,8 @@ def observe(con, so, now, new_news=(), new_spikes=(), six_rows=(), price_fn=iex_
     # 3) IEX spikes -> news gate (same newsgate as the US rules)
     for sp in new_spikes:
         d = "long" if sp["ret"] > 0 else "short"
-        news = newsgate.hard_news(con, sp["ticker"], sp["ts"], d, so.get("news_window_min", 60), so.get("news_novelty_min", 0.5), 2)
+        news = newsgate.hard_news(con, sp["ticker"], sp["ts"], d, so.get("news_window_min", 60), so.get("news_novelty_min", 0.5), 2,
+                                  now_iso=db.iso(now))
         if news:
             n += bool(log_obs(con, now, sp["ticker"], so, "swiss_spike_news", "iex_spike", sp["id"], d,
                               f"{sp['tf']} IEX x{sp['ratio']:.1f} {sp['ret']:+.2f}% backed by {news['kind']} T{news['tier']} "
